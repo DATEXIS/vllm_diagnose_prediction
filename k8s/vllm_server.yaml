@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+  labels:
+    app: vllm-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vllm-server
+  template:
+    metadata:
+      labels:
+        app: vllm-server
+    spec:
+      containers:
+        - name: vllm-server
+          # Update the image and version if needed
+          image: vllm/vllm-openai:v0.4.0 
+          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          args:
+            - "--model=Qwen/Qwen3-32B"
+            - "--max-model-len=16384"
+            - "--tensor-parallel-size=1"
+            - "--download-dir=/models"
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "1" # Update based on your cluster's GPU resources
+              memory: "64Gi"
+            requests:
+              nvidia.com/gpu: "1"
+              memory: "16Gi"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: model-volume
+              mountPath: /models
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+        - name: model-volume
+          persistentVolumeClaim:
+            claimName: model-volume # Ensure this PVC exists for caching weights
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-server
+spec:
+  selector:
+    app: vllm-server
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8000

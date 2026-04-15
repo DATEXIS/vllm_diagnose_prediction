@@ -1,0 +1,11 @@
+vllm
+openai
+aiohttp
+tqdm
+pandas
+pyarrow
+pyyaml
+scikit-learn
+pydantic
+
+jinja2

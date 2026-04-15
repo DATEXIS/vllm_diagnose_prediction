@@ -1,0 +1,34 @@
+# vLLM diagnose prediction configuration
+
+data:
+  # Path to the patients parquet file
+  patients_file: "data/mimic/mimic_dataset.pq"
+  # Target column we want to predict (e.g. 'ICD_CODES', 'disease')
+  target_col: "ICD_CODES"
+  # Maximum number of patients to process (set to null to process all)
+  sample_size: null
+
+model:
+  name: "Qwen/Qwen3-32B"
+  api_base: "http://vllm-server.default.svc.cluster.local/v1"
+  api_key: "EMPTY"
+
+inference:
+  temperature: 0.2
+  max_tokens: 2000
+  concurrency: 10
+  batch_size: 1
+  guided_decoding: true
+
+k8s:
+  namespace: default
+  server:
+    gpu_count: 1
+    memory_limit: 64
+    memory_request: 16
+  client:
+    image: your-registry/vllm_diagnose_prediction:latest
+    cpu_limit: 4
+    cpu_request: 1
+    memory_limit: 16 
+    memory_request: 4

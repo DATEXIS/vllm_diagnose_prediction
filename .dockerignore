@@ -1,0 +1,21 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+env.bak/
+venv.bak/
+# Ignore models if they happen to live in the local dir
+models/
+scripts/
+patients data/
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
