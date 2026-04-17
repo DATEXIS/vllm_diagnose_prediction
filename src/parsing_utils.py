@@ -63,10 +63,13 @@ def safe_parse_json(text: str) -> List[str]:
     Uses a multi-stage approach with specialized repair for truncation.
     """
     if not text:
+        logger.debug("safe_parse_json: empty text")
         return []
-    
+
     # Pre-processing
     original_text = text.strip()
+    logger.debug(f"safe_parse_json input (first 500ch): {original_text[:500]}")
+    logger.debug(f"safe_parse_json input (last 500ch): {original_text[-500:]}")
     
     def try_validate(candidate: str) -> Optional[List[str]]:
         try:

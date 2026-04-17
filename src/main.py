@@ -10,11 +10,14 @@ from inference import run_inference
 from evaluate import evaluate_predictions
 
 # Setup standard logging format
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+def setup_logging(config: dict):
+    level = config.get('log_level', 'INFO').upper()
+    logging.basicConfig(
+        level=getattr(logging, level, logging.INFO),
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+
 logger = logging.getLogger(__name__)
 
 def load_config(config_path: str) -> dict:
@@ -62,6 +65,7 @@ def main():
     args = parser.parse_args()
 
     config = load_config(args.config)
+    setup_logging(config)
     asyncio.run(main_async(config))
 
 if __name__ == "__main__":

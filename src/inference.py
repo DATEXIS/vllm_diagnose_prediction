@@ -105,13 +105,17 @@ async def run_inference(config: dict, prompts: List[str], schema: Optional[Dict[
 def extract_text_from_responses(responses: List[Any]) -> List[str]:
     """Extracts the final answer string from the chat completions payload."""
     final_output = []
-    for resp in responses:
+    for i, resp in enumerate(responses):
         if not resp or "choices" not in resp:
+            logger.warning(f"Response {i}: Missing 'choices' field - {resp}")
             final_output.append("")
             continue
         try:
             text = resp["choices"][0]["message"]["content"]
+            logger.debug(f"Response {i} (first 500ch): {text[:500]}")
+            logger.debug(f"Response {i} (last 500ch): {text[-500:]}")
             final_output.append(text)
-        except (KeyError, IndexError):
+        except (KeyError, IndexError) as e:
+            logger.warning(f"Response {i}: Failed to extract text - {e}, resp: {resp}")
             final_output.append("")
     return final_output

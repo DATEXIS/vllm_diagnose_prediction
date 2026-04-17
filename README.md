@@ -45,6 +45,8 @@ Package the inference client and dataset into a Docker image:
    ```
    *Note: Cross-platform builds (e.g., Mac to Linux) are handled automatically based on the `platform` configuration.*
 
+> **Tip:** Config changes (e.g., `sample_size`, `guided_decoding`, model parameters) do NOT require a new Docker build. The config is passed to Kubernetes at runtime via ConfigMap. Simply run `server_start.py` or `client_start.py` to apply new config values.
+
 ### 4. Kubernetes Deployment
 The pipeline uses dynamic manifest generation driven by `configs/config.yaml`.
 
@@ -103,6 +105,31 @@ python scripts/client_start.py
 
 ---
 
+## 📄 Guided Decoding JSON Structure
+
+When `guided_decoding` is enabled, the model must output JSON that conforms to the `ICDsModel` schema defined in `src/prompter.py`. The expected shape is:
+
+```json
+{
+  "diagnoses": [
+    {
+      "icd_code": "I10",
+      "reason": "Patient has persistent hypertension noted in the admission note."
+    },
+    {
+      "icd_code": "E11.9",
+      "reason": "Elevated blood glucose levels indicating type 2 diabetes mellitus."
+    }
+  ]
+}
+```
+
+The `icd_code` field must contain a valid ICD code, and `reason` should provide a brief clinical justification (1‑2 sentences).
+
+---
+
 ## 💡 Customization
-- **Output Schema:** Modify the `ICDPrediction` class in `src/prompter.py` to change the structured output format.
-- **Workflow Iteration:** Use `scripts/client_restart.py` to quickly rebuild the container and rerun a job after code changes.
+
+- **Config Changes:** Modify `configs/config.yaml` and re-run `server_start.py` or `client_start.py` to apply. No rebuild needed.
+- **Output Schema:** Modify the `ICDPrediction` class in `src/prompter.py` to change the structured output format. This requires a Docker rebuild.
+- **Code Changes:** After modifying Python code, rebuild the image with `python scripts/build_docker.py`.

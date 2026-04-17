@@ -2,6 +2,7 @@
 
 # The job_name is used to name the Kubernetes pods and services
 job_name: "test-run"
+log_level: "INFO" # Logging level: DEBUG, INFO, WARNING, ERROR
 
 # Docker configuration for building and pushing images
 docker:
@@ -16,12 +17,8 @@ data:
   # Path to the patients parquet file relative to the project root
   # Note: This file will be baked into the Docker image
   patients_file: "data/mimic/patients_1411.pq"
-  
-  # Target column we want to predict (e.g. 'ICD_CODES', 'disease')
-  target_col: "ICD_CODES"
-  
-  # Maximum number of patients to process (set to null to process all)
-  sample_size: 100
+  target_col: "ICD_CODES" # Target column we want to predict (e.g. 'ICD_CODES', 'disease')
+  sample_size: 40 # Maximum number of patients to process (set to null to process all)
 
 # Model configuration
 model:
@@ -36,7 +33,7 @@ inference:
   temperature: 0.2
   max_tokens: 2000
   concurrency: 10
-  guided_decoding: true # Uses JSON schema for structured ICD extraction
+  guided_decoding: false # Uses JSON schema for structured ICD extraction
 
 # Kubernetes cluster configuration
 k8s:

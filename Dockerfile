@@ -13,13 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code, base config, and data
-COPY configs/ configs/
+# Copy the application code and data
 COPY src/ src/
 COPY data/ data/
 
 # Set Python to run unbuffered so logs appear immediately
 ENV PYTHONUNBUFFERED=1
 
-# Command to run the inference client by default
-CMD ["python", "src/main.py", "--config", "configs/config.yaml"]
+# Command to run the inference client by default (expects config via ConfigMap mount)
+CMD ["python", "src/main.py", "--config", "/app/config/config.yaml"]

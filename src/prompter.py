@@ -18,16 +18,22 @@ def build_prompt(patient: Dict[str, Any]) -> str:
     """
     admission_note = patient.get('admission_note', 'No note available.')
     
-    # We use a simple but effective prompt for ICD prediction.
-    # We can expand this with few-shot examples or manifestations if available in the dataset.
+    json_example = '''{
+  "diagnoses": [
+    {"icd_code": "I10", "reason": "Patient has persistent hypertension noted in the admission note."},
+    {"icd_code": "E11.9", "reason": "Elevated blood glucose levels indicating type 2 diabetes mellitus."}
+  ]
+}'''
+
     system_instruction = (
         "You are an expert medical coder. Your task is to extract all relevant "
         "diagnoses from the provided medical admission note and assign the most appropriate "
         "ICD (International Classification of Diseases) codes for each. "
-        "Provide a concise reason (1-2 sentences) for each assigned ICD code based on the clinical evidence in the text."
+        "Provide a concise reason (1-2 sentences) for each assigned ICD code based on the clinical evidence in the text.\n"
+        f"Output your diagnoses as a JSON object following this schema:\n{json_example}"
     )
-    
-    prompt = f"{system_instruction}\n\n### Admission Note:\n{admission_note}\n\n### Extracted ICD Codes:\n"
+
+    prompt = f"{system_instruction}\n\n### Admission Note:\n{admission_note}\n\n### Output:\n"
     return prompt
 
 def build_prompts(df: pd.DataFrame) -> List[str]:

@@ -1,6 +1,15 @@
 # src/k8s_templates.py
 
-server_template = """apiVersion: apps/v1
+server_template = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: diagnose-config-{{ cfg.job_name }}
+  namespace: {{ cfg.k8s.namespace }}
+data:
+  config.yaml: |
+    {{ cfg | tojson }}
+---
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: vllm-server-{{ cfg.job_name }}
@@ -19,7 +28,7 @@ spec:
     spec:
       containers:
         - name: vllm-server
-          image: {{ cfg.docker.server_image }} 
+          image: {{ cfg.docker.server_image }}
           command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
           args:
             - "--model={{ cfg.model.name }}"
@@ -40,18 +49,25 @@ spec:
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
+            - name: config
+              mountPath: /app/config
           env:
             - name: HUGGING_FACE_HUB_TOKEN
               valueFrom:
                 secretKeyRef:
                   name: hf-token-secret
                   key: HF_TOKEN
+            - name: CONFIG_PATH
+              value: /app/config/config.yaml
       imagePullSecrets:
         - name: {{ cfg.k8s.image_pull_secrets }}
       volumes:
         - name: dshm
           emptyDir:
             medium: Memory
+        - name: config
+          configMap:
+            name: diagnose-config-{{ cfg.job_name }}
       nodeSelector:
         gpu: {{ cfg.k8s.server.gpu_type }}
 ---
@@ -69,7 +85,16 @@ spec:
       targetPort: 8000
 """
 
-client_template = """apiVersion: batch/v1
+client_template = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: diagnose-config-{{ cfg.job_name }}
+  namespace: {{ cfg.k8s.namespace }}
+data:
+  config.yaml: |
+    {{ cfg | tojson }}
+---
+apiVersion: batch/v1
 kind: Job
 metadata:
   name: diagnose-prediction-{{ cfg.job_name }}
@@ -79,13 +104,20 @@ spec:
     spec:
       containers:
         - name: inference-client
-          image: {{ cfg.docker.registry }}/{{ cfg.docker.image_name }}:{{ cfg.docker.tag }} 
-          command: ["python3", "-u", "src/main.py", "--config", "configs/config.yaml"]
+          image: {{ cfg.docker.registry }}/{{ cfg.docker.image_name }}:{{ cfg.docker.tag }}
+          command: ["python3", "-u", "src/main.py", "--config", "/app/config/config.yaml"]
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
           resources:
             limits:
               memory: "{{ cfg.k8s.client.memory_limit }}"
             requests:
               memory: "{{ cfg.k8s.client.memory_request }}"
+      volumes:
+        - name: config
+          configMap:
+            name: diagnose-config-{{ cfg.job_name }}
       imagePullSecrets:
         - name: {{ cfg.k8s.image_pull_secrets }}
       restartPolicy: Never

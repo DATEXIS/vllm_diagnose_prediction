@@ -3,6 +3,7 @@ import logging
 import ast
 from typing import List, Set, Any, Optional, Dict
 
+import numpy as np
 import pandas as pd
 from sklearn.metrics import precision_recall_fscore_support
 from prompter import ICDsModel
@@ -35,8 +36,13 @@ def normalize_icd(code: Any) -> str:
 
 def safe_parse_true_labels(val: Any) -> List[str]:
     """Parses ground truth labels if they are stored as strings, lists, or arrays."""
+    logger.debug(f"safe_parse_true_labels input type: {type(val)}, value: {repr(val)[:200]}")
     # Check if it's already list-like (avoids ValueError in pd.isna)
     if isinstance(val, list):
+        return [str(i) for i in val]
+    
+    # Handle numpy arrays
+    if isinstance(val, np.ndarray):
         return [str(i) for i in val]
     
     # Handle NaN/None cases
@@ -104,9 +110,19 @@ def evaluate_predictions(df: pd.DataFrame, target_col: str, predictions: List[st
     y_pred_lists = [safe_parse_json(pred) for pred in predictions]
     y_true_lists = [safe_parse_true_labels(val) for val in df[target_col].tolist()]
     
+    valid_json_count = sum(1 for pred in y_pred_lists if pred)
+    logger.info(f"Samples with valid JSON: {valid_json_count}/{len(predictions)}")
+    
+    # Debug: Log first few samples
+    logger.debug(f"Sample predictions (raw): {y_pred_lists[:3]}")
+    logger.debug(f"Sample ground truth (raw): {y_true_lists[:3]}")
+    
     # Apply normalization to all codes
     y_pred_norm = [[normalize_icd(c) for c in clist if normalize_icd(c)] for clist in y_pred_lists]
     y_true_norm = [[normalize_icd(c) for c in clist if normalize_icd(c)] for clist in y_true_lists]
+    
+    logger.debug(f"Sample predictions (normalized): {y_pred_norm[:3]}")
+    logger.debug(f"Sample ground truth (normalized): {y_true_norm[:3]}")
     
     metrics = calculate_metrics(y_true_norm, y_pred_norm)
     
