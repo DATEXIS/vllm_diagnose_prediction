@@ -11,61 +11,27 @@ from pydantic import ValidationError
 logger = logging.getLogger(__name__)
 
 import re
+from parsing_utils import safe_parse_json
 
-def safe_parse_json(text: str) -> List[str]:
-    """Tries to parse the LLM output as JSON and extract the ICD codes with robust repair logic."""
-    if not text:
-        return []
-    
-    # Pre-processing: Strip whitespace and potentially find the JSON block
-    original_text = text.strip()
+def normalize_icd(code: Any) -> str:
+    """
+    Normalizes ICD codes for evaluation:
+    1. Converts to string.
+    2. Takes only the first 3 characters.
+    3. Removes dots.
+    Example: 'K86.0' -> 'K86', 'I10' -> 'I10'
+    """
+    if not code:
+        return ""
+    code_str = str(code).strip().upper()
+    # Take first three characters and remove dots
+    # Note: ICD-10 category is usually the first 3 chars (e.g. A00-B99)
+    # We remove dots just in case they are in the first 3 (rare but possible in some formats)
+    normalized = code_str.replace(".", "")
+    return normalized[:3]
 
-    def try_parse(candidate: str) -> Optional[List[str]]:
-        try:
-            # First attempt: Pydantic's direct JSON validation
-            validated = ICDsModel.model_validate_json(candidate)
-            return [d.icd_code for d in validated.diagnoses if d.icd_code]
-        except (ValidationError, ValueError, json.JSONDecodeError):
-            try:
-                # Second attempt: Repair common LLM mistakes (literal newlines/tabs)
-                repaired = candidate.replace('\n', '\\n').replace('\t', '\\t').replace('\r', '\\r')
-                validated = ICDsModel.model_validate_json(repaired)
-                return [d.icd_code for d in validated.diagnoses if d.icd_code]
-            except (ValidationError, ValueError, json.JSONDecodeError):
-                # Third attempt: Handle truncation
-                # Find the last completed diagnosis object '}' and close the structure
-                if '"diagnoses": [' in candidate:
-                    try:
-                        # Find the last completed item in the diagnoses list
-                        # Search for the last '}' that is not at the very end
-                        last_brace = candidate.rstrip().rfind('}')
-                        if last_brace != -1:
-                            truncated_repair = candidate[:last_brace+1] + ']}'
-                            # Re-run repair on the truncated version
-                            repaired_truncated = truncated_repair.replace('\n', '\\n').replace('\t', '\\t')
-                            validated = ICDsModel.model_validate_json(repaired_truncated)
-                            return [d.icd_code for d in validated.diagnoses if d.icd_code]
-                    except Exception:
-                        pass
-                return None
+# safe_parse_json is now imported from parsing_utils.py
 
-    # Step 1: Try parsing the whole thing
-    codes = try_parse(original_text)
-    
-    # Step 2: If failed, try regex extraction
-    if codes is None:
-        # Match as much as possible starting from the first {
-        match = re.search(r'\{(.*)', original_text, re.DOTALL)
-        if match:
-             codes = try_parse(match.group())
-
-    # Step 3: Handle the result
-    if codes is not None:
-        return codes
-    
-    # Final fallback for logging
-    logger.warning(f"Failed to parse or validate JSON after all repair attempts. Preview (1000ch):\n{original_text[:1000]}")
-    return []
 
 def safe_parse_true_labels(val: Any) -> List[str]:
     """Parses ground truth labels if they are stored as strings, lists, or arrays."""
@@ -138,7 +104,11 @@ def evaluate_predictions(df: pd.DataFrame, target_col: str, predictions: List[st
     y_pred_lists = [safe_parse_json(pred) for pred in predictions]
     y_true_lists = [safe_parse_true_labels(val) for val in df[target_col].tolist()]
     
-    metrics = calculate_metrics(y_true_lists, y_pred_lists)
+    # Apply normalization to all codes
+    y_pred_norm = [[normalize_icd(c) for c in clist if normalize_icd(c)] for clist in y_pred_lists]
+    y_true_norm = [[normalize_icd(c) for c in clist if normalize_icd(c)] for clist in y_true_lists]
+    
+    metrics = calculate_metrics(y_true_norm, y_pred_norm)
     
     logger.info(f"Evaluation Results:")
     logger.info(f"Micro F1: {metrics['micro']['f1']:.4f} (P: {metrics['micro']['precision']:.4f}, R: {metrics['micro']['recall']:.4f})")
