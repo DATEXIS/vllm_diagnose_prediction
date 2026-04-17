@@ -15,18 +15,18 @@ def load_config(config_path: str) -> dict:
         logger.error(f"Failed to load config: {e}")
         sys.exit(1)
 
-def build_and_push(image_name: str):
+def build_and_push(image_uri: str, platform: str):
     """Builds and pushes the Docker container."""
-    logger.info(f"Building Docker image: {image_name}")
+    logger.info(f"Building Docker image for platform {platform}: {image_uri}")
     try:
-        subprocess.run(["docker", "build", "-t", image_name, "."], check=True)
+        subprocess.run(["docker", "build", "--platform", platform, "-t", image_uri, "."], check=True)
     except subprocess.CalledProcessError as e:
-        logger.error(f"Docker build failed: {e}")
+        logger.error(f"Docker build failed: {e}") 
         sys.exit(1)
 
-    logger.info(f"Pushing Docker image: {image_name}")
+    logger.info(f"Pushing Docker image: {image_uri}")
     try:
-        subprocess.run(["docker", "push", image_name], check=True)
+        subprocess.run(["docker", "push", image_uri], check=True)
     except subprocess.CalledProcessError as e:
         logger.error(f"Docker push failed: {e}")
         sys.exit(1)
@@ -41,16 +41,17 @@ def main():
     config = load_config(args.config)
     
     try:
-        image_name = config['k8s']['client']['image']
-    except KeyError:
-        logger.error("Configuration missing 'k8s.client.image' key.")
+        docker_cfg = config['docker']
+        registry = docker_cfg['registry']
+        image_name = docker_cfg['image_name']
+        tag = docker_cfg['tag']
+        platform = docker_cfg.get('platform', 'linux/amd64')
+        image_uri = f"{registry}/{image_name}:{tag}"
+    except KeyError as e:
+        logger.error(f"Configuration missing key: {e}")
         sys.exit(1)
 
-    if image_name == "your-registry/vllm_diagnose_prediction:latest" or "your-user" in image_name:
-        logger.warning("You are using the default image placeholder. Please update 'k8s.client.image' in your config!")
-        # We'll allow it to attempt the build locally anyway to test the context, but push will likely fail.
-
-    build_and_push(image_name)
+    build_and_push(image_uri, platform)
 
 if __name__ == "__main__":
     main()

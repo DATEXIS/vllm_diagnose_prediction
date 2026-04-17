@@ -24,7 +24,7 @@ def build_prompt(patient: Dict[str, Any]) -> str:
         "You are an expert medical coder. Your task is to extract all relevant "
         "diagnoses from the provided medical admission note and assign the most appropriate "
         "ICD (International Classification of Diseases) codes for each. "
-        "Provide a reason for each assigned ICD code based on the clinical evidence in the text."
+        "Provide a concise reason (1-2 sentences) for each assigned ICD code based on the clinical evidence in the text."
     )
     
     prompt = f"{system_instruction}\n\n### Admission Note:\n{admission_note}\n\n### Extracted ICD Codes:\n"

@@ -46,11 +46,6 @@ def build_payload(config: dict, prompt: str, schema: Optional[Dict[str, Any]] = 
 def build_coroutine(session: ClientSession, config: dict, url: str, prompt: str, schema: Optional[Dict[str, Any]] = None):
     payload = build_payload(config, prompt, schema)
     headers = {"Content-Type": "application/json"}
-    
-    # We might need an API key if the vLLM server requires it
-    api_key = config['model'].get('api_key', 'EMPTY')
-    if api_key != 'EMPTY':
-         headers["Authorization"] = f"Bearer {api_key}"
 
     async def request_coro():
         try:
@@ -63,25 +58,32 @@ def build_coroutine(session: ClientSession, config: dict, url: str, prompt: str,
 
     return request_coro
 
-async def gather_with_concurrency(n: int, coros: List[Any]):
+async def gather_with_concurrency(n: int, coros_with_prompts: List[tuple]):
     """Gathers coroutines with a concurrency limit using a Semaphore."""
     semaphore = asyncio.Semaphore(n)
 
-    async def sem_wrapper(coro):
+    async def sem_wrapper(coro, prompt):
         async with semaphore:
             try:
                 # Add a timeout to prevent hanging forever
                 return await asyncio.wait_for(coro(), timeout=600)
             except Exception as e:
-                logger.error(f"Task failed or timed out: {e}")
+                logger.error(f"Task failed for prompt: {prompt[:50]}... Error: {e}")
                 return None
 
-    wrapped = [sem_wrapper(coro) for coro in coros]
+    wrapped = [sem_wrapper(coro, prompt) for coro, prompt in coros_with_prompts]
     return await tqdm_asyncio.gather(*wrapped, desc="Processing Prompts")
 
 async def run_inference(config: dict, prompts: List[str], schema: Optional[Dict[str, Any]] = None) -> List[Any]:
     """Runs concurrent inference over all prompts."""
-    api_base = config['model']['api_base']
+    job_name = config.get('job_name', 'default')
+    namespace = config.get('k8s', {}).get('namespace', 'default')
+    
+    # Check if a manual override is given (for local testing), otherwise build dynamically
+    api_base = config['model'].get('api_base')
+    if not api_base:
+        api_base = f"http://vllm-server-{job_name}.{namespace}.svc.cluster.local/v1"
+        
     await check_connection(api_base)
     
     url = f"{api_base}/chat/completions"
@@ -94,7 +96,9 @@ async def run_inference(config: dict, prompts: List[str], schema: Optional[Dict[
             build_coroutine(session, config, url, prompt, schema)
             for prompt in prompts
         ]
-        responses = await gather_with_concurrency(concurrency, coroutines)
+        # Zip coroutines and prompts so we can track context during execution
+        coros_with_prompts = list(zip(coroutines, prompts))
+        responses = await gather_with_concurrency(concurrency, coros_with_prompts)
         
     return extract_text_from_responses(responses)
 
