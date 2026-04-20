@@ -6,7 +6,7 @@
 # 1. Setup
 python -m venv venv && source venv/bin/activate && pip install -r requirements.txt
 
-# 2. Build Docker (config in configs/config.yaml first)
+# 2. Build Docker (docker settings in configs/setup.yaml)
 python scripts/build_docker.py
 
 # 3. Start vLLM server (must run before client)
@@ -27,7 +27,8 @@ python scripts/client_restart.py
 
 ## Critical Config Notes
 
-- `configs/config.yaml`: All pipeline settings live here
+- `configs/setup.yaml`: Docker and wandb settings (rarely changed, requires rebuild)
+- `configs/experiment.yaml`: Job, model, data, k8s, inference settings (no rebuild needed)
 - `docker.platform`: Must be `linux/amd64` when building on Mac M1/M2/M3
 - `inference.guided_decoding`: Enables Pydantic-based JSON schema output (modify `src/prompter.py` to change)
 - `data/mimic/`: Gitignored - contains sensitive patient data
@@ -51,5 +52,5 @@ kubectl get pods -l app=vllm-server -n <namespace>
 ## Testing
 
 No formal test suite. Validate changes by running a small sample:
-- Set `sample_size: 10` in config
+- Set `sample_size: 10` in experiment config
 - Use `client_restart.py` for quick iteration

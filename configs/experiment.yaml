@@ -1,0 +1,45 @@
+# vLLM diagnose prediction - Experiment configuration
+# Changed per experiment/run (no server rebuild required for most params)
+
+# Run identification
+job_name: "test-run"
+run_name: "qwen8b-guided-decoding"
+
+# Logging level
+log_level: "INFO"
+
+# Inference parameters
+inference:
+  temperature: 0.2
+  max_tokens: 2000
+  concurrency: 10
+  guided_decoding: True
+
+# Dataset configuration
+data:
+  patients_file: "data/mimic/patients_1411.pq"
+  target_col: "ICD_CODES"
+  sample_size: 40
+
+# Model configuration
+model:
+  name: "Qwen/Qwen3-8B"
+  max_model_len: 16384
+  max_num_seqs: 256
+  max_num_batched_tokens: 2048
+  enable_chunked_prefill: true
+
+# Kubernetes cluster configuration
+k8s:
+  namespace: "jfrick"
+  image_pull_secrets: "private-registry-auth"
+
+  server:
+    gpu_count: 1
+    gpu_type: "a100"
+    memory_limit: "64Gi"
+    memory_request: "16Gi"
+
+  client:
+    memory_limit: "16Gi"
+    memory_request: "4Gi"

@@ -111,7 +111,8 @@ def evaluate_predictions(df: pd.DataFrame, target_col: str, predictions: List[st
     y_true_lists = [safe_parse_true_labels(val) for val in df[target_col].tolist()]
     
     valid_json_count = sum(1 for pred in y_pred_lists if pred)
-    logger.info(f"Samples with valid JSON: {valid_json_count}/{len(predictions)}")
+    valid_json_pct = (valid_json_count / len(predictions)) * 100
+    logger.info(f"Samples with valid JSON: {valid_json_count}/{len(predictions)} ({valid_json_pct:.1f}%)")
     
     # Debug: Log first few samples
     logger.debug(f"Sample predictions (raw): {y_pred_lists[:3]}")
@@ -125,6 +126,7 @@ def evaluate_predictions(df: pd.DataFrame, target_col: str, predictions: List[st
     logger.debug(f"Sample ground truth (normalized): {y_true_norm[:3]}")
     
     metrics = calculate_metrics(y_true_norm, y_pred_norm)
+    metrics['valid_json_pct'] = valid_json_pct
     
     logger.info(f"Evaluation Results:")
     logger.info(f"Micro F1: {metrics['micro']['f1']:.4f} (P: {metrics['micro']['precision']:.4f}, R: {metrics['micro']['recall']:.4f})")

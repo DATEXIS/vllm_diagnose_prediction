@@ -13,15 +13,23 @@ logger = logging.getLogger(__name__)
 async def check_connection(api_base: str):
     """Checks if the vLLM server is accessible."""
     health_url = api_base.replace("/v1", "/health")
-    logger.info(f"Checking connection to {health_url}")
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(health_url, timeout=10.0)
-            response.raise_for_status()
-            logger.info("Successfully connected to vLLM server.")
-    except Exception as e:
-        logger.error(f"Could not connect to vLLM server at {health_url}: {e}")
-        raise RuntimeError("vLLM server connection failed.")
+    backoff_time = 1
+    num_tries = 0
+    max_tries = 10000
+    while num_tries <= max_tries:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(health_url, timeout=10.0)
+                response.raise_for_status()
+                logger.info("Successfully connected to vLLM server.")
+                return
+        except Exception as e:
+            logger.info(f"Connect {num_tries} to {health_url}, "
+                        f"retrying in {backoff_time}s: {e}")
+            await asyncio.sleep(backoff_time)
+            backoff_time = min(backoff_time * 2, 60)
+            num_tries += 1
+    raise RuntimeError(f"Could not connect to vLLM server after {max_tries} attempts")
 
 def build_payload(config: dict, prompt: str, schema: Optional[Dict[str, Any]] = None) -> dict:
     """Builds the JSON payload for the vLLM API request."""

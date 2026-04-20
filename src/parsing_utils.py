@@ -106,5 +106,5 @@ def safe_parse_json(text: str) -> List[str]:
         return codes
     
     # Final logging if all else fails
-    logger.warning(f"Failed to parse or validate JSON after repair. Preview (1000ch):\n{original_text[:1000]}")
+    logger.debug(f"Failed to parse or validate JSON after repair. Preview (1000ch):\n{original_text[:1000]}")
     return []

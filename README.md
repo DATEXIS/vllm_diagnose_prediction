@@ -11,13 +11,13 @@ This repository provides a modular foundation for deploying LLMs on Kubernetes c
 This pipeline is designed to run on a Kubernetes cluster. Ensure you have the following prerequisites met:
 
 ### 1. Account & Permissions
-- Verify that your campus or organization account has active permissions for cluster access.
-- For RIS cluster users, this typically involves induction via a supervisor or the dedicated support channels.
+- Verify that your BHT campus account has active permissions for cluster access.
+- This typically involves induction via a supervisor or the dedicated support channels.
 
 ### 2. Environment Configuration
-- **VPN:** A secure VPN connection to the organization network is required for all cluster interactions.
+- **VPN:** A secure VPN connection to the BHT network is required for all cluster interactions. Setup via [BHT VPN Documentation](https://doku.bht-berlin.de/zugang/vpn).
 - **Kubectl:** Install and configure `kubectl` to point to your target cluster namespace.
-- **Cluster Documentation:** Refer to the [RIS Cluster Docs](https://docs.cluster.ris.bht-berlin.de/) for detailed setup steps.
+- **Cluster Documentation:** Refer to the [BHT Cluster Docs](https://docs.cluster.ris.bht-berlin.de/) for detailed setup steps.
 
 ---
 
@@ -38,17 +38,20 @@ Place clinical datasets (e.g., in Parquet format) in the `data/mimic/` directory
 
 ### 3. Containerization
 Package the inference client and dataset into a Docker image:
-1. Configure the `docker` section in `configs/config.yaml`.
+1. Configure docker settings in `configs/setup.yaml`.
 2. Execute the build script:
    ```bash
    python scripts/build_docker.py
    ```
    *Note: Cross-platform builds (e.g., Mac to Linux) are handled automatically based on the `platform` configuration.*
 
-> **Tip:** Config changes (e.g., `sample_size`, `guided_decoding`, model parameters) do NOT require a new Docker build. The config is passed to Kubernetes at runtime via ConfigMap. Simply run `server_start.py` or `client_start.py` to apply new config values.
+> **Tip:** Config changes in `configs/experiment.yaml` are passed to Kubernetes at runtime via ConfigMap.
+> - **Inference/Data params** (e.g., `sample_size`, `temperature`, `guided_decoding`): Only requires client restart (`python scripts/client_start.py`)
+> - **Model params** (e.g., `name`, `max_model_len`): Requires server restart (`python scripts/server_start.py`)
+> - **Setup config** (docker, wandb): Requires Docker rebuild
 
 ### 4. Kubernetes Deployment
-The pipeline uses dynamic manifest generation driven by `configs/config.yaml`.
+The pipeline uses dynamic manifest generation driven by config files.
 
 #### Start the vLLM Server
 The server hosts the model weights and provides the inference API:
@@ -64,16 +67,27 @@ python scripts/client_start.py
 
 ---
 
-## ⚙️ Configuration Reference (`configs/config.yaml`)
+## ⚙️ Configuration Reference
 
+This pipeline uses two config files:
+
+### `configs/setup.yaml` (rarely changed)
 | Parameter | Section | Description |
 | :--- | :--- | :--- |
-| `job_name` | Root | Unique identifier for the run. Used to name Pods, Services, and Jobs. |
 | `registry` | `docker` | Base URL/path for the Docker registry. |
 | `image_name` | `docker` | Name of the resulting client Docker image. |
 | `tag` | `docker` | Version tag for the image (e.g., `latest`). |
 | `platform` | `docker` | Target CPU architecture for the build (e.g., `linux/amd64`). |
 | `server_image` | `docker` | The specific `vLLM` container image used for the server. |
+| `project` | `wandb` | Weights & Biases project name. |
+| `entity` | `wandb` | W&B team/entity name (optional). |
+
+### `configs/experiment.yaml` (changed per experiment)
+| Parameter | Section | Description |
+| :--- | :--- | :--- |
+| `job_name` | Root | Unique identifier for the run. Used to name Pods, Services, and Jobs. |
+| `run_name` | Root | Name used for W&B logging (allows multiple runs without restarting server). |
+| `log_level` | Root | Logging level (DEBUG, INFO, WARNING, ERROR). |
 | `patients_file` | `data` | Path to the input Parquet file relative to the project root. |
 | `target_col` | `data` | The column name containing the ground truth labels or text. |
 | `sample_size` | `data` | Number of rows to process for testing. Set to `null` for the full dataset. |
@@ -95,13 +109,35 @@ python scripts/client_start.py
 
 ---
 
-## 📊 Monitoring
+## 🔑 API Keys Setup
+
+Both API keys are passed to the Kubernetes pods via secrets defined in `k8s_templates.py`:
+
+### HuggingFace Token (for gated models)
+The `HF_TOKEN` environment variable is set from a Kubernetes secret:
+```bash
+# Ensure your k8s secret exists (typically created by cluster admin)
+# Secret name: hf-token-secret, Key: HF_TOKEN
+```
+
+### Weights & Biases
+The `WANDB_API_KEY` environment variable is set from a Kubernetes secret:
+```bash
+# Ensure your k8s secret exists
+kubectl create secret generic wandb-secret --from-literal=api-key=<your_key> -n <namespace>
+```
+Configure `project` and `entity` in `configs/setup.yaml`.
+
+---
+
+## 📊 Monitoring & Experiment Tracking
 
 - **Utilization:** Monitor available hardware and cluster health via the [Grafana Dashboard](https://monitoring.cluster.ris.bht-berlin.de/).
 - **Logs:** Watch real-time execution logs:
   ```bash
   kubectl logs -f job/diagnose-prediction-{{job_name}} -n {{namespace}}
   ```
+- **WandB:** If enabled (with valid API key), the pipeline logs parameters, metrics (F1 micro/macro, precision, recall), and a sample table with 30 predictions. View results at: https://wandb.ai/datexis-phd/ICD-prediction
 
 ---
 
@@ -130,6 +166,7 @@ The `icd_code` field must contain a valid ICD code, and `reason` should provide 
 
 ## 💡 Customization
 
-- **Config Changes:** Modify `configs/config.yaml` and re-run `server_start.py` or `client_start.py` to apply. No rebuild needed.
+- **Experiment Config:** Modify `configs/experiment.yaml` and re-run `server_start.py` or `client_start.py` to apply. No rebuild needed.
+- **Setup Config:** Changes to `configs/setup.yaml` (docker, wandb) require a Docker rebuild.
 - **Output Schema:** Modify the `ICDPrediction` class in `src/prompter.py` to change the structured output format. This requires a Docker rebuild.
 - **Code Changes:** After modifying Python code, rebuild the image with `python scripts/build_docker.py`.

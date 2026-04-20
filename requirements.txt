@@ -7,5 +7,6 @@ pyarrow
 pyyaml
 scikit-learn
 pydantic
+wandb
 
 jinja2

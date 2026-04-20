@@ -1,0 +1,15 @@
+# vLLM diagnose prediction - Setup configuration
+# Rarely changed (only when docker or wandb settings change)
+
+# Docker configuration
+docker:
+  registry: "registry.datexis.com/jfrick"
+  image_name: "vllm_diagnose_prediction"
+  tag: "latest"
+  platform: "linux/amd64"
+  server_image: "vllm/vllm-openai:v0.12.0"
+
+# WandB configuration (api_key from env var WANDB_API_KEY)
+wandb:
+  project: "ICD-prediction"
+  entity: "datexis-phd"

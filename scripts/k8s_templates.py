@@ -109,6 +109,17 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /app/config
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secret
+                  key: api-key
           resources:
             limits:
               memory: "{{ cfg.k8s.client.memory_limit }}"
