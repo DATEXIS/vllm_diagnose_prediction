@@ -19,7 +19,7 @@ inference:
 data:
   patients_file: "data/mimic/patients_1411.pq"
   target_col: "ICD_CODES"
-  sample_size: 40
+  sample_size: 100
 
 # Model configuration
 model:
@@ -43,3 +43,22 @@ k8s:
   client:
     memory_limit: "16Gi"
     memory_request: "4Gi"
+
+# MERLIN 2 configuration
+merlin2:
+  enabled: false
+  sim_threshold: 0.7
+  fpr_threshold: 0.1
+  fnr_threshold: 0.1
+  max_tokens_budget: 512
+  max_iterations: 5
+  convergence_threshold: 0.95
+
+# Meta-Verifier configuration (for instruction generation)
+meta_verifier:
+  enabled: false  # Enable to generate contrastive instructions from results
+  embedding_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract"  # Model for semantic embeddings
+  min_error_count: 3  # Min errors before generating an instruction
+  efficacy_threshold: 0.1  # Min efficacy score for instructions
+  upload_results: true  # Upload generated instructions to wandb
+  download_run_name: null  # Download instructions from previous run (null = none)

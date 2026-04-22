@@ -31,16 +31,20 @@ async def check_connection(api_base: str):
             num_tries += 1
     raise RuntimeError(f"Could not connect to vLLM server after {max_tries} attempts")
 
-def build_payload(config: dict, prompt: str, schema: Optional[Dict[str, Any]] = None) -> dict:
+def build_payload(config: dict, prompt: str, schema: Optional[Dict[str, Any]] = None, system_prompt: Optional[str] = None) -> dict:
     """Builds the JSON payload for the vLLM API request."""
     model_name = config['model']['name']
     inf_cfg = config['inference']
+    
+    messages = [{"role": "user", "content": prompt}]
+    if system_prompt:
+        messages.insert(0, {"role": "system", "content": system_prompt})
     
     payload = {
         "model": model_name,
         "temperature": inf_cfg.get('temperature', 0.2),
         "max_tokens": inf_cfg.get('max_tokens', 2000),
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
         "stream": False,
     }
 
@@ -51,8 +55,8 @@ def build_payload(config: dict, prompt: str, schema: Optional[Dict[str, Any]] = 
         }
     return payload
 
-def build_coroutine(session: ClientSession, config: dict, url: str, prompt: str, schema: Optional[Dict[str, Any]] = None):
-    payload = build_payload(config, prompt, schema)
+def build_coroutine(session: ClientSession, config: dict, url: str, prompt: str, schema: Optional[Dict[str, Any]] = None, system_prompt: Optional[str] = None):
+    payload = build_payload(config, prompt, schema, system_prompt)
     headers = {"Content-Type": "application/json"}
 
     async def request_coro():
@@ -109,6 +113,58 @@ async def run_inference(config: dict, prompts: List[str], schema: Optional[Dict[
         responses = await gather_with_concurrency(concurrency, coros_with_prompts)
         
     return extract_text_from_responses(responses)
+
+async def run_inference_with_system(
+    config: dict,
+    prompts: List[str],
+    system_prompt: str = "You are a helpful medical assistant.",
+    temperature: float = 0.4,
+    max_tokens: int = 2000,
+) -> List[Optional[str]]:
+    """Runs concurrent inference with a system prompt, returns raw text responses."""
+    job_name = config.get('job_name', 'default')
+    namespace = config.get('k8s', {}).get('namespace', "default")
+    
+    api_base = config['model'].get('api_base')
+    if not api_base:
+        api_base = f"http://vllm-server-{job_name}.{namespace}.svc.cluster.local/v1"
+        
+    url = f"{api_base}/chat/completions"
+    concurrency = config.get('inference', {}).get('concurrency', 10)
+    
+    async with ClientSession(timeout=ClientTimeout(total=3600)) as session:
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def send_with_sem(prompt: str):
+            async with semaphore:
+                payload = {
+                    "model": config['model'].get('name', 'Qwen/Qwen3-8B'),
+                    "temperature": temperature,
+                    "n": 1,
+                    "max_tokens": max_tokens,
+                    "stream": False,
+                    "echo": False,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt},
+                    ]
+                }
+                headers = {"Content-Type": "application/json"}
+                try:
+                    async with session.post(url, json=payload, headers=headers) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return data["choices"][0]["message"]["content"]
+                        else:
+                            logger.error(f"Error {resp.status}: {await resp.text()}")
+                            return None
+                except Exception as e:
+                    logger.error(f"Request failed: {e}")
+                    return None
+
+        tasks = [send_with_sem(p) for p in prompts]
+        from tqdm.asyncio import tqdm_asyncio
+        return await tqdm_asyncio.gather(*tasks, desc="Processing")
 
 def extract_text_from_responses(responses: List[Any]) -> List[str]:
     """Extracts the final answer string from the chat completions payload."""

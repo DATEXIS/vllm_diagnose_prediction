@@ -5,7 +5,7 @@ import unittest
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from evaluate import normalize_icd, calculate_metrics
+from src.data.evaluate import normalize_icd, calculate_metrics
 
 class TestEvaluation(unittest.TestCase):
     

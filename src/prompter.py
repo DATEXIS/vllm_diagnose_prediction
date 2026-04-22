@@ -1,10 +1,11 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 import pandas as pd
 
 class ICDPrediction(BaseModel):
     icd_code: str = Field(description="The ICD code for the diagnosis.")
     reason: str = Field(description="Clinical reasoning for assigning this code based on the admission note.")
+    quote: Optional[str] = Field(default=None, description="Clinical evidence excerpt from note.")
 
 class ICDsModel(BaseModel):
     diagnoses: List[ICDPrediction] = Field(

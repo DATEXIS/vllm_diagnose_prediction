@@ -8,5 +8,6 @@ pyyaml
 scikit-learn
 pydantic
 wandb
+sentence-transformers
 
 jinja2

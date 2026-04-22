@@ -5,8 +5,8 @@ from k8s_templates import client_template
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-def start_client():
-    logger.info("Initializing Inference Client deployment...")
+def stop_merlin():
+    logger.info("Initializing MERLIN pipeline shutdown...")
     
     # 1. Load config
     cfg = load_config()
@@ -14,11 +14,11 @@ def start_client():
     # 2. Render manifest
     yaml_str = render_k8s_template(cfg, client_template)
     
-    # 3. Apply to cluster
-    logger.info(f"Applying dynamic client manifest to cluster (namespace: {cfg['k8s']['namespace']})...")
-    run_kubectl(yaml_str, command="apply")
+    # 3. Delete from cluster
+    logger.info("Deleting dynamic MERLIN manifest from cluster...")
+    run_kubectl(yaml_str, command="delete")
     
-    logger.info("Client job started successfully.")
+    logger.info("MERLIN job stopped.")
 
 if __name__ == "__main__":
-    start_client()
+    stop_merlin()

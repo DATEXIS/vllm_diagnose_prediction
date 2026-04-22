@@ -5,7 +5,7 @@ import logging
 # Add src to path so we can import parsing_utils
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from parsing_utils import safe_parse_json
+from src.utils.parsing_utils import safe_parse_json
 
 # Configure logging to see failures
 logging.basicConfig(level=logging.INFO)

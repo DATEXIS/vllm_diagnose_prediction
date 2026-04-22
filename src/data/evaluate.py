@@ -6,13 +6,13 @@ from typing import List, Set, Any, Optional, Dict
 import numpy as np
 import pandas as pd
 from sklearn.metrics import precision_recall_fscore_support
-from prompter import ICDsModel
+from src.prompter import ICDsModel
 from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
 
 import re
-from parsing_utils import safe_parse_json
+from src.utils.parsing_utils import safe_parse_json
 
 def normalize_icd(code: Any) -> str:
     """

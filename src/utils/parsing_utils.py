@@ -2,7 +2,7 @@ import json
 import logging
 import re
 from typing import List, Optional, Dict, Any
-from prompter import ICDsModel
+from src.prompter import ICDsModel
 from pydantic import ValidationError
 
 logger = logging.getLogger(__name__)
