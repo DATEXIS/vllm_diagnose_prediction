@@ -3,7 +3,7 @@
 
 # Docker configuration
 docker:
-  registry: "registry.datexis.com/jfrick"
+  registry: "registry.datexis.com/caka7833"
   image_name: "vllm_diagnose_prediction"
   tag: "latest"
   platform: "linux/amd64"
