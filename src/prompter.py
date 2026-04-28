@@ -32,8 +32,19 @@ def build_prompt(patient: Dict[str, Any]) -> str:
         "Provide a concise reason (1-2 sentences) for each assigned ICD code based on the clinical evidence in the text.\n"
         f"Output your diagnoses as a JSON object following this schema:\n{json_example}"
     )
+    context_block = ""
+    if retrieved_chunks:
+        context_parts = "\n\n".join(
+            f"[Source {i+1}] {chunk}" for i, chunk in enumerate(retrieved_chunks)
+        )
+        context_block = f"\n\n### Relevant Medical Literature:\n{context_parts}"
 
-    prompt = f"{system_instruction}\n\n### Admission Note:\n{admission_note}\n\n### Output:\n"
+    prompt = (
+        f"{system_instruction}"
+        f"{context_block}" # empty if rag deactivated
+        f"\n\n### Admission Note:\n{admission_note}"
+        f"\n\n### Output:\n"
+    )
     return prompt
 
 def build_prompts(df: pd.DataFrame) -> List[str]:

@@ -107,6 +107,7 @@ venv.bak/
 
 # Data sets 
 data/mimic/
+data/pubmed/
 
 # Spyder project settings
 .spyderproject

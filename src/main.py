@@ -9,6 +9,7 @@ from prompter import build_prompts, get_schema
 from inference import run_inference
 from evaluate import evaluate_predictions
 import wandb_logger
+from retriever import build_index, retrieve_for_dataframe
 
 # Setup standard logging format
 def setup_logging(config: dict):
@@ -43,17 +44,32 @@ async def main_async(config: dict):
         if wandb_initialized:
             wandb_logger.finish_wandb()
         return
+    
+    # 2. RAG
+    rag_config = config.get('rag', {})
+    if rag_config.get('enabled', False):
+        logger.info("RAG aktiviert – starte Retrieval ...")
+        index = build_index(
+            abstracts_path=rag_config['abstracts_path'],
+            index_persist_dir=rag_config['index_persist_dir'],
+        )
+        df = retrieve_for_dataframe(
+            df=df,
+            index=index,
+            k=rag_config.get('top_k', 5),
+        )
+        logger.info("Retrieval abgeschlossen.")
 
-    # 2. Build Prompts
+    # 3. Build Prompts
     prompts = build_prompts(df)
 
-    # 3. Get Schema
+    # 4. Get Schema
     schema = get_schema() if config['inference'].get('guided_decoding', False) else None
 
-    # 4. Run Inference
+    # 5. Run Inference
     predictions = await run_inference(config, prompts, schema)
 
-    # 5. Evaluate
+    # 6. Evaluate
     target_col = config['data'].get('target_col', 'ICD_CODES')
     if target_col in df.columns:
         metrics, df_results = evaluate_predictions(df, target_col, predictions)

@@ -1,24 +1,36 @@
-# Use an official Python runtime as a parent image
+# Use a stable Python base image
 FROM python:3.10-slim
 
-# Set the working directory in the container
+# Prevent Python from writing pyc files & enable logs immediately
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Set working directory
 WORKDIR /app
 
-# Copy the requirements file into the container
-COPY requirements.txt .
-
-# Install any essential build tools and the Python packages
+# Install system dependencies (minimal)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r requirements.txt
+    build-essential \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the application code and data
+# Upgrade pip first (important!)
+RUN pip install --upgrade pip
+
+# Copy requirements first (for caching)
+COPY requirements.txt .
+
+# Install Python dependencies (more robust)
+RUN pip install \
+    --no-cache-dir \
+    --timeout 1000 \
+    --prefer-binary \
+    -r requirements.txt
+
+# Copy project files
 COPY src/ src/
 COPY data/ data/
 
-# Set Python to run unbuffered so logs appear immediately
-ENV PYTHONUNBUFFERED=1
-
-# Command to run the inference client by default (expects config via ConfigMap mount)
+# Default command
 CMD ["python", "src/main.py", "--config", "/app/config/config.yaml"]
