@@ -1,3 +1,9 @@
+stages:
+  - build
+  - test
+  - docker
+  - deploy
+
 docker_build:
   stage: docker
   image: docker:26-cli
