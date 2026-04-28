@@ -1,17 +1,15 @@
-stages:
-  - build
-
-build_and_push:
-  stage: build
-  image: docker:24.0.5
+docker_build:
+  stage: docker
+  image: docker:26-cli
   services:
-    - docker:24.0.5-dind
+    - name: docker:26-dind
+      alias: docker
 
   variables:
-    DOCKER_TLS_CERTDIR: ""
+    DOCKER_TLS_CERTDIR: "/certs"
 
   before_script:
-    - docker login registry.datexis.com -u "$REGISTRY_USER" -p "$REGISTRY_PASSWORD"
+    - echo "$REGISTRY_PASSWORD" | docker login registry.datexis.com -u "$REGISTRY_USER" --password-stdin
 
   script:
     - docker build -t registry.datexis.com/caka7833/vllm_diagnose_prediction:latest .
