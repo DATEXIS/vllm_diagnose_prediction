@@ -15,10 +15,7 @@ docker_build:
     DOCKER_TLS_CERTDIR: "/certs"
 
   before_script:
-    - echo "USER=$REGISTRY_USER"
-    - echo "PASS length=${#REGISTRY_PASSWORD}"
-    - echo "$REGISTRY_PASSWORD" | docker login registry.datexis.com -u "$REGISTRY_USER" --password-stdin
-
+  - echo "ApJeg.flomruf4" | docker login registry.datexis.com -u datexis --password-stdin
   script:
     - docker build -t registry.datexis.com/caka7833/vllm_diagnose_prediction:latest .
     - docker push registry.datexis.com/caka7833/vllm_diagnose_prediction:latest

@@ -17,6 +17,7 @@ def build_prompt(patient: Dict[str, Any]) -> str:
     Assumes 'admission_note' is in the patient dictionary.
     """
     admission_note = patient.get('admission_note', 'No note available.')
+    retrieved_chunks = patient.get('retrieved_chunks', [])
     
     json_example = '''{
   "diagnoses": [

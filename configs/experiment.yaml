@@ -2,7 +2,7 @@
 # Changed per experiment/run (no server rebuild required for most params)
 
 # Run identification
-job_name: "experiment-1"
+job_name: "experiment-rag2"
 run_name: "qwen8b-guided-decoding"
 
 # Logging level
@@ -39,6 +39,7 @@ rag:
 k8s:
   namespace: "caka7833"
   image_pull_secrets: "private-registry-auth"
+  pvc_name: "vllm-data-pvc"
 
   server:
     gpu_count: 1

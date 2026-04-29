@@ -30,7 +30,6 @@ RUN pip install \
 
 # Copy project files
 COPY src/ src/
-COPY data/ data/
 
 # Default command
 CMD ["python", "src/main.py", "--config", "/app/config/config.yaml"]

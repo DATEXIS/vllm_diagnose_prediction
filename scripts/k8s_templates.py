@@ -109,6 +109,8 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /app/config
+            - name: data
+              mountPath: /app/data
           env:
             - name: HUGGING_FACE_HUB_TOKEN
               valueFrom:
@@ -129,6 +131,9 @@ spec:
         - name: config
           configMap:
             name: diagnose-config-{{ cfg.job_name }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ cfg.k8s.pvc_name }}
       imagePullSecrets:
         - name: {{ cfg.k8s.image_pull_secrets }}
       restartPolicy: Never
