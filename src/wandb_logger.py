@@ -151,12 +151,15 @@ def log_sample_table(df: pd.DataFrame, predictions: List[str], metrics: dict, n_
             hadm_id = row.get('hadm_id', '')
             admission_note = row.get('admission_note', '')[:500] if row.get('admission_note') else ''
             icd_codes = row.get(target_col, '')
+            raw_chunks = row.get('retrieved_chunks', [])
+            retrieved_chunks_str = "\n\n".join(raw_chunks) if isinstance(raw_chunks, list) else str(raw_chunks or '')
 
             table_data.append({
                 "subject_id": str(subject_id) if subject_id else "",
                 "hadm_id": str(hadm_id) if hadm_id else "",
                 "admission_note": admission_note,
                 "ICD_CODES": str(icd_codes),
+                "retrieved_chunks": retrieved_chunks_str[:2000],
                 "response": raw_response[:1000] if raw_response else "",
                 "json": str(parsed)[:1000] if parsed else "",
                 "predictions": str(pred_codes),
