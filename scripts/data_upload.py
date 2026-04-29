@@ -20,7 +20,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 2Gi
+      storage: 4Gi
 """
 
 UPLOADER_POD_TEMPLATE = """apiVersion: v1

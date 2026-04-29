@@ -10,6 +10,8 @@ logger = logging.getLogger(__name__)
 
 ARTICLE_MODEL = "ncbi/MedCPT-Article-Encoder"
 QUERY_MODEL = "ncbi/MedCPT-Query-Encoder"
+BUILD_BATCH_SIZE = 16
+QUERY_BATCH_SIZE = 32
 
 
 def _get_device() -> str:
@@ -20,40 +22,42 @@ def _get_device() -> str:
         return "cpu"
 
 
-def _encode(texts: list, model_name: str, max_length: int, batch_size: int, device: str) -> np.ndarray:
-    """Encode a list of texts using CLS-token pooling (required by MedCPT)."""
-    import torch
+def _load_model(model_name: str, device: str):
+    """Load tokenizer + model once. Caller is responsible for cleanup."""
     from transformers import AutoTokenizer, AutoModel
-
+    logger.info(f"Loading {model_name} on {device} ...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModel.from_pretrained(model_name).to(device).eval()
+    return tokenizer, model
 
-    all_embeddings = []
-    for start in tqdm(range(0, len(texts), batch_size), desc=model_name.split("/")[-1]):
-        batch = texts[start : start + batch_size]
-        with torch.no_grad():
-            enc = tokenizer(
-                batch,
-                truncation=True,
-                padding=True,
-                max_length=max_length,
-                return_tensors="pt",
-            )
-            enc = {k: v.to(device) for k, v in enc.items()}
-            out = model(**enc)
-            # MedCPT uses the [CLS] token — do NOT use mean pooling
-            emb = out.last_hidden_state[:, 0, :].cpu().float().numpy()
-        all_embeddings.append(emb)
 
-    return np.vstack(all_embeddings)
+def _encode_batch(batch: list, tokenizer, model, max_length: int, device: str) -> np.ndarray:
+    """Encode one batch → L2-normalised CLS embeddings (float32)."""
+    import torch
+    with torch.no_grad():
+        enc = tokenizer(
+            batch,
+            truncation=True,
+            padding=True,
+            max_length=max_length,
+            return_tensors="pt",
+        )
+        enc = {k: v.to(device) for k, v in enc.items()}
+        out = model(**enc)
+        # MedCPT requires CLS-token pooling — do NOT use mean pooling
+        emb = out.last_hidden_state[:, 0, :].cpu().float().numpy()
+
+    norms = np.linalg.norm(emb, axis=1, keepdims=True)
+    return (emb / np.clip(norms, 1e-8, None)).astype(np.float32)
 
 
 def build_index(abstracts_path: str, index_persist_dir: str, max_abstracts: int = None):
     """
-    Reads PubMed abstracts (one line = one abstract), encodes them with
-    MedCPT-Article-Encoder, and stores a FAISS inner-product index on disk.
+    Streams PubMed abstracts in batches → encodes each batch with
+    MedCPT-Article-Encoder → adds directly to a FAISS IndexFlatIP.
 
-    Storage is ~768 MB binary for 250k abstracts (vs. several GB with LlamaIndex JSON).
+    Peak RAM = one batch of embeddings, not the full matrix.
+    Persists faiss.index (binary) + texts.pkl.
     Returns (faiss_index, texts).
     """
     import faiss
@@ -70,36 +74,46 @@ def build_index(abstracts_path: str, index_persist_dir: str, max_abstracts: int 
         logger.info(f"Index loaded: {index.ntotal} vectors, dim={index.d}")
         return index, texts
 
-    logger.info(f"Reading abstracts from {abstracts_path} ...")
+    device = _get_device()
+    logger.info(f"Device: {device}")
+    tokenizer, model = _load_model(ARTICLE_MODEL, device)
+
     texts = []
+    batch: list = []
+    index = None
+
+    def flush(batch_texts: list):
+        nonlocal index
+        emb = _encode_batch(batch_texts, tokenizer, model, max_length=512, device=device)
+        if index is None:
+            index = faiss.IndexFlatIP(emb.shape[1])
+        index.add(emb)
+
+    logger.info(f"Streaming abstracts from {abstracts_path} ...")
     with open(abstracts_path, "r", encoding="utf-8") as f:
-        for line in f:
+        for line in tqdm(f, desc="Building FAISS index"):
             line = line.strip()
-            if line:
-                texts.append(line)
+            if not line:
+                continue
+            texts.append(line)
+            batch.append(line)
+            if len(batch) == BUILD_BATCH_SIZE:
+                flush(batch)
+                batch = []
             if max_abstracts and len(texts) >= max_abstracts:
                 break
 
-    logger.info(f"{len(texts)} abstracts loaded — encoding with {ARTICLE_MODEL} ...")
-    device = _get_device()
-    logger.info(f"Device: {device}")
+    if batch:
+        flush(batch)
 
-    embeddings = _encode(texts, ARTICLE_MODEL, max_length=512, batch_size=64, device=device)
-
-    # L2-normalise so inner product equals cosine similarity
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    embeddings = (embeddings / np.clip(norms, 1e-8, None)).astype(np.float32)
-
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(embeddings)
+    del model  # free model weights from RAM/VRAM
 
     persist_path.mkdir(parents=True, exist_ok=True)
     faiss.write_index(index, str(index_file))
     with open(texts_file, "wb") as f:
         pickle.dump(texts, f)
 
-    logger.info(f"FAISS index saved to {index_persist_dir} ({index.ntotal} vectors, dim={dim})")
+    logger.info(f"FAISS index saved: {index.ntotal} vectors, dim={index.d} → {index_persist_dir}")
     return index, texts
 
 
@@ -111,18 +125,23 @@ def retrieve_for_dataframe(
     query_column: str = "admission_note",
 ) -> pd.DataFrame:
     """
-    Encodes each admission note with MedCPT-Query-Encoder and retrieves
-    the top-k most similar PubMed abstracts. Stores results as 'retrieved_chunks'
-    (list of strings per row).
+    Encodes admission notes with MedCPT-Query-Encoder (loaded once) and
+    retrieves the top-k most similar PubMed abstracts per row.
+    Stores results as 'retrieved_chunks' (list of strings).
     """
-    queries = [str(val)[:500] for val in df[query_column]]
-
-    logger.info(f"Encoding {len(queries)} queries with {QUERY_MODEL} ...")
     device = _get_device()
-    q_embs = _encode(queries, QUERY_MODEL, max_length=64, batch_size=32, device=device)
+    tokenizer, model = _load_model(QUERY_MODEL, device)
 
-    norms = np.linalg.norm(q_embs, axis=1, keepdims=True)
-    q_embs = (q_embs / np.clip(norms, 1e-8, None)).astype(np.float32)
+    queries = [str(val)[:500] for val in df[query_column]]
+    logger.info(f"Encoding {len(queries)} queries ...")
+
+    all_embs = []
+    for start in range(0, len(queries), QUERY_BATCH_SIZE):
+        batch = queries[start : start + QUERY_BATCH_SIZE]
+        all_embs.append(_encode_batch(batch, tokenizer, model, max_length=64, device=device))
+
+    del model
+    q_embs = np.vstack(all_embs)
 
     _, indices = index.search(q_embs, k)
 
@@ -133,5 +152,5 @@ def retrieve_for_dataframe(
 
     df = df.copy()
     df["retrieved_chunks"] = retrieved_chunks_list
-    logger.info(f"Retrieval complete: top-{k} chunks per row, {len(retrieved_chunks_list)} rows total.")
+    logger.info(f"Retrieval complete: top-{k} chunks × {len(retrieved_chunks_list)} rows.")
     return df

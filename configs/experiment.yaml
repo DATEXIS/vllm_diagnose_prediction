@@ -34,7 +34,7 @@ rag:
   abstracts_path: "data/pubmed/pubmed_abstracts_random_lines_250k.txt"
   index_persist_dir: "data/pubmed/index"
   top_k: 5
-  max_abstracts: null # null = use all 250k; set a number to cap (e.g. 50000) if PVC space is tight
+  max_abstracts: 50000 # null = use all 250k; set a number to cap (e.g. 50000) if PVC space is tight
 
 # Kubernetes cluster configuration
 k8s:
