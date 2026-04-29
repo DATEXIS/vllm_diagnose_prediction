@@ -8,7 +8,6 @@ pyyaml
 scikit-learn
 pydantic
 wandb
-
 jinja2
-llama-index
-llama-index-embeddings-huggingface
+transformers
+faiss-cpu

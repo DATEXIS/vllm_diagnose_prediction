@@ -49,13 +49,15 @@ async def main_async(config: dict):
     rag_config = config.get('rag', {})
     if rag_config.get('enabled', False):
         logger.info("RAG aktiviert – starte Retrieval ...")
-        index = build_index(
+        index, texts = build_index(
             abstracts_path=rag_config['abstracts_path'],
             index_persist_dir=rag_config['index_persist_dir'],
+            max_abstracts=rag_config.get('max_abstracts'),
         )
         df = retrieve_for_dataframe(
             df=df,
             index=index,
+            texts=texts,
             k=rag_config.get('top_k', 5),
         )
         logger.info("Retrieval abgeschlossen.")
