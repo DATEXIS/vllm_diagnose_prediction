@@ -1,0 +1,4 @@
+### Admission Note
+{admission_note}
+
+### Output

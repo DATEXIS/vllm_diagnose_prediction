@@ -1,150 +1,54 @@
 # Agent Instructions
+These are general instructions. The repo might contain additional repo specific instructions.
+You can call me Jan.
 
-## Key Commands
+## Coding style:
+This is research code, not production code. Optimize for iteration speed and debuggability, not robustness:
 
-```bash
-# 1. Setup
-python -m venv venv && source venv/bin/activate && pip install -r requirements.txt
+- Let it crash. Loud failures > silent fallbacks.
+- No defensive try/except around things that "might" fail — I want the stack trace.
+- No retry loops, no graceful degradation, no "safe defaults" that mask bugs.
+- A crashed run I can debug is cheaper than a half-completed run that wasted hours of compute.
+- Validate inputs at boundaries only. Inside the code, trust the types.
 
-# 2. Build Docker (docker settings in configs/setup.yaml)
-python scripts/build_docker.py
+## Repo Structure
+Most experiments are run with k8s. k8s yaml are build at runtime by scripts using settings in config.
+A base repo should have at least following folders:
+- configs/: YAML files that contain parameters:
+  - experiment.yaml: Experiment-specific settings
+  - setup.yaml: settings rarely changed like registry: "registry.datexis.com/jfrick"
+- scripts/: Orchestration scripts for building and running experiments. 
+  - k8s templates + builders
+  - docker build scripts 
+- src/: Source code for model inference, data loading, evaluation
+- data/: (Gitignored) Local data files, e.g. MIMIC-IV extracts
+- tests/: Unit tests for critical components (optional but recommended)
 
-# 3. Start vLLM server (must run before client)
-python scripts/server_start.py
+## Logging
+- Use wandb for experiment logging. entity: "datexis-phd".
+- Meaningful metrics can be logged.
+- Meaningful texts can be logged as artifacts and tables. Only log 30 examples in text tables.
 
-# 4. Run inference job (MERLIN pipeline)
-python scripts/merlin_start.py
+## Data Handling
+We have 3 options to store data. Docker image, wandb or PVC for larger datasets.
 
-# 5. Rebuild + rerun after code changes
-python scripts/merlin_restart.py
-```
+# Available Hardware
+The k8s cluster has P100, V100, A100, H100, H200 and B200 GPUs. 
+You are allowed to use hardware that was defined in the configs.
+Do not increase required hardware without explicit permission. If you need more resources, ask first and justify why.
 
-## Architecture
+## Self-review
+Before declaring a task done:
 
-- **Server**: vLLM model server (GPU) - hosts model weights, provides OpenAI-compatible API
-- **Client**: K8s Job that loads data, runs inference via HTTP, saves predictions
-- **Entry point**: `src/main.py` - loads config, builds prompts, runs async inference, evaluates
+1. Re-read your own diff as if I were reviewing it.
+2. Ask, in writing, what I would object to. Anticipate the obvious complaints (over-engineering, untested assumption, ignored reference file, silent fallback added "just in case", missed PROGRESS.md update, missed prompts.log update).
+3. Fix those issues yourself before handing it back.
+4. If anything is still uncertain, say so explicitly. Do not paper over it.
 
-## Critical Config Notes
+## Communication style
 
-- `configs/setup.yaml`: Docker and wandb settings (rarely changed, requires rebuild)
-- `configs/experiment.yaml`: Job, model, data, k8s, inference settings (no rebuild needed)
-- `docker.platform`: Must be `linux/amd64` when building on Mac M1/M2/M3
-- `inference.guided_decoding`: Enables Pydantic-based JSON schema output (modify `src/prompter.py` to change)
-- `data/mimic/`: Gitignored - contains sensitive patient data
-
-## Execution Order
-
-1. Start server (`server_start.py`) - waits for pod ready
-2. Run MERLIN pipeline (`merlin_start.py`) - sends inference requests to server
-3. Server must be running before MERLIN; use `merlin_restart.py` to rebuild and rerun
-
-## Monitoring
-
-```bash
-# Watch client logs
-kubectl logs -f job/diagnose-prediction-<job_name> -n <namespace>
-
-# Check server status
-kubectl get pods -l app=vllm-server -n <namespace>
-```
-
-## Testing
-
-No formal test suite. Validate changes by running a small sample:
-- Set `sample_size: 10` in experiment config
-- Use `merlin_restart.py` for quick iteration
-
----
-
-## MERLIN 2 Framework
-
-MERLIN 2 is a dual-loop, multi-agent framework for iteratively improving ICD coding from clinical admission notes.
-
-### Architecture
-
-| Component | Role | File |
-|-----------|------|------|
-| **Generator (G)** | Primary clinical coding LLM - vLLM with guided decoding + CoT | `src/generator.py` |
-| **Retriever (R)** | Memory fetcher - threshold-based boolean selection | `src/retriever.py` |
-| **Verifier (V)** | Traffic controller - synchronous halting conditions | `src/verifier.py` |
-| **Pipeline** | Loop A orchestration (synchronous inference) | `src/run_inference.py` |
-
-### Dual-Loop Pipeline
-
-**Loop A (Synchronous - Real-Time):**
-1. t=0: Initial pass - Generator predicts with baseline instructions
-2. t>0: Retriever fetches instructions based on predicted codes (FPR/FNR thresholds)
-3. Generator processes warnings sequentially in `<thinking>` blocks
-4. Verifier checks halting conditions → repeat until convergence
-
-**Loop B (Asynchronous - Global Memory):**
-- Meta-Verifier reviews closed cases, generates contrastive instructions
-- Background clustering groups instructions by ICD code and error type
-
-### Configuration
-
-Add to `configs/experiment.yaml`:
-
-```yaml
-# MERLIN 2 settings
-merlin2:
-  enabled: true                    # Enable MERLIN2 pipeline
-  sim_threshold: 0.7               # Semantic similarity threshold
-  fpr_threshold: 0.1               # False positive rate threshold
-  fnr_threshold: 0.1               # False negative rate threshold
-  max_tokens_budget: 512           # Max tokens per retrieval
-  max_iterations: 5                # Max refinement passes
-  convergence_threshold: 0.95      # Jaccard similarity for convergence
-
-# Override Generator settings
-generator:
-  api_base: "http://localhost:8000/v1"
-  model: "Qwen/Qwen3-8B"
-  temperature: 0.0
-  max_tokens: 1024
-```
-
-### Running MERLIN2
-
-```bash
-# Enable in experiment.yaml, then:
-python scripts/merlin_start.py
-
-# Or test locally (requires vLLM running):
-python -c "
-from src.run_inference import run_inference
-result = run_inference('Patient presents with chest pain and diabetes...')
-print(result)
-"
-```
-
-### Retrieval Logic
-
-Threshold-based boolean selection:
-```
-fetch instruction IF (semantic_similarity >= X) OR (fpr >= Y) OR (fnr >= Z)
-```
-- Filters by predicted codes matching instruction's target_code
-- Prioritizes by efficacy_score descending
-- Respects max_tokens_budget
-
-### Halting Conditions
-
-Verifier stops the inference loop when ANY condition is met:
-1. **max_iterations**: Reached iteration limit
-2. **budget_exhausted**: Token budget depleted
-3. **no_new_instructions**: Retrieval returned empty
-4. **convergence**: Jaccard similarity ≥ convergence_threshold between consecutive predictions
-
-### Testing MERLIN2
-
-```bash
-# Run MERLIN2 unit tests
-pytest tests/test_schemas.py tests/test_retriever.py tests/test_generator.py tests/test_verifier.py tests/test_run_inference.py -v
-
-# Test with small sample
-# Set in experiment.yaml:
-#   sample_size: 10
-#   merlin2.max_iterations: 3
-```
+- Direct. No filler, no hype, no apologies.
+- State assumptions before acting on them.
+- If I am wrong about something, tell me directly and explain why.
+- Cite file paths and line numbers when referencing code.
+- Batching questions is fine and preferred — ask multiple clarifying questions in one turn rather than ping-ponging. Larger, denser requests are cheaper than many small ones.

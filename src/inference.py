@@ -4,14 +4,21 @@ import traceback
 from typing import List, Dict, Any, Optional
 
 import httpx
+import traceback
 from aiohttp import ClientSession, ClientTimeout
-from openai import AsyncOpenAI
 from tqdm.asyncio import tqdm_asyncio
 
 logger = logging.getLogger(__name__)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+_vllm_connected = False
 
 async def check_connection(api_base: str):
     """Checks if the vLLM server is accessible."""
+    global _vllm_connected
+    if _vllm_connected:
+        return
+        
     health_url = api_base.replace("/v1", "/health")
     backoff_time = 1
     num_tries = 0
@@ -21,10 +28,11 @@ async def check_connection(api_base: str):
             async with httpx.AsyncClient() as client:
                 response = await client.get(health_url, timeout=10.0)
                 response.raise_for_status()
-                logger.info("Successfully connected to vLLM server.")
+                logger.debug("Successfully connected to vLLM server.")
+                _vllm_connected = True
                 return
         except Exception as e:
-            logger.info(f"Connect {num_tries} to {health_url}, "
+            logger.debug(f"Connect {num_tries} to {health_url}, "
                         f"retrying in {backoff_time}s: {e}")
             await asyncio.sleep(backoff_time)
             backoff_time = min(backoff_time * 2, 60)
@@ -48,6 +56,9 @@ def build_payload(config: dict, prompt: str, schema: Optional[Dict[str, Any]] = 
         "stream": False,
     }
 
+    if "reasoning_budget" in inf_cfg:
+        payload["reasoning_budget"] = inf_cfg["reasoning_budget"]
+
     if inf_cfg.get('guided_decoding', False) and schema:
         payload["response_format"] = {
             "type": "json_schema",
@@ -60,13 +71,11 @@ def build_coroutine(session: ClientSession, config: dict, url: str, prompt: str,
     headers = {"Content-Type": "application/json"}
 
     async def request_coro():
-        try:
-            async with session.post(url, json=payload, headers=headers) as response:
-                response.raise_for_status()
-                return await response.json()
-        except Exception as e:
-            logger.error(f"Request failed: {e}\n{traceback.format_exc()}")
-            return None
+        async with session.post(url, json=payload, headers=headers) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise RuntimeError(f"Request failed with status {response.status}: {text}")
+            return await response.json()
 
     return request_coro
 
@@ -76,12 +85,7 @@ async def gather_with_concurrency(n: int, coros_with_prompts: List[tuple]):
 
     async def sem_wrapper(coro, prompt):
         async with semaphore:
-            try:
-                # Add a timeout to prevent hanging forever
-                return await asyncio.wait_for(coro(), timeout=600)
-            except Exception as e:
-                logger.error(f"Task failed for prompt: {prompt[:50]}... Error: {e}")
-                return None
+            return await asyncio.wait_for(coro(), timeout=600)
 
     wrapped = [sem_wrapper(coro, prompt) for coro, prompt in coros_with_prompts]
     return await tqdm_asyncio.gather(*wrapped, desc="Processing Prompts")
@@ -101,7 +105,9 @@ async def run_inference(config: dict, prompts: List[str], schema: Optional[Dict[
     url = f"{api_base}/chat/completions"
     concurrency = config['inference'].get('concurrency', 10)
     
-    logger.info(f"Starting inference with concurrency={concurrency} for {len(prompts)} prompts...")
+    # Hide the "for 1 prompts" message to declutter logs
+    if len(prompts) > 1:
+        logger.info(f"Starting inference with concurrency={concurrency} for {len(prompts)} prompts...")
     
     async with ClientSession(timeout=ClientTimeout(total=None)) as session:
         coroutines = [
@@ -166,20 +172,34 @@ async def run_inference_with_system(
         from tqdm.asyncio import tqdm_asyncio
         return await tqdm_asyncio.gather(*tasks, desc="Processing")
 
+
 def extract_text_from_responses(responses: List[Any]) -> List[str]:
-    """Extracts the final answer string from the chat completions payload."""
     final_output = []
     for i, resp in enumerate(responses):
-        if not resp or "choices" not in resp:
-            logger.warning(f"Response {i}: Missing 'choices' field - {resp}")
-            final_output.append("")
-            continue
+        if not resp:
+            raise RuntimeError(f"Response {i} is None/empty")
+
+        if "error" in resp:
+            raise RuntimeError(f"Response {i} returned API error: {resp['error']}")
+
+        if "choices" not in resp:
+            if "reasoning_content" in resp:
+                final_output.append(resp["reasoning_content"])
+                continue
+
+            raise RuntimeError(f"Response {i} missing 'choices' field. Keys: {list(resp.keys())}")
+
         try:
-            text = resp["choices"][0]["message"]["content"]
-            logger.debug(f"Response {i} (first 500ch): {text[:500]}")
-            logger.debug(f"Response {i} (last 500ch): {text[-500:]}")
+            # Standard path
+            choice = resp["choices"][0]
+            text = choice["message"].get("content", "")
+
+            # 0.19.1 specific: check if content is null but reasoning exists
+            if not text and "reasoning_content" in choice["message"]:
+                text = choice["message"]["reasoning_content"]
+
             final_output.append(text)
         except (KeyError, IndexError) as e:
-            logger.warning(f"Response {i}: Failed to extract text - {e}, resp: {resp}")
+            logger.warning(f"Response {i}: Extraction failed - {e}")
             final_output.append("")
     return final_output

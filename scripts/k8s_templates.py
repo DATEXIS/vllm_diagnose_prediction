@@ -45,7 +45,6 @@ spec:
               memory: "{{ cfg.k8s.server.memory_limit }}"
             requests:
               nvidia.com/gpu: "{{ cfg.k8s.server.gpu_count }}"
-              memory: "{{ cfg.k8s.server.memory_request }}"
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
@@ -105,7 +104,7 @@ spec:
       containers:
         - name: inference-client
           image: {{ cfg.docker.registry }}/{{ cfg.docker.image_name }}:{{ cfg.docker.tag }}
-          command: ["python3", "-u", "src/main.py", "--config", "/app/config/config.yaml"]
+          command: ["python3", "-u", "-m", "src.main", "--config", "/app/config/config.yaml"]
           volumeMounts:
             - name: config
               mountPath: /app/config
@@ -123,8 +122,6 @@ spec:
           resources:
             limits:
               memory: "{{ cfg.k8s.client.memory_limit }}"
-            requests:
-              memory: "{{ cfg.k8s.client.memory_request }}"
       volumes:
         - name: config
           configMap:

@@ -1,110 +1,99 @@
+"""Minimal JSON parsing for LLM responses.
+
+Philosophy (per AGENTS.md): no repair, no regex fallbacks, no silent
+failures. Find the last valid JSON object in the response and validate
+it against the prediction schema. If the model's output cannot be
+parsed, raise — the pipeline is meant to crash so the issue surfaces.
+"""
+
 import json
 import logging
-import re
-from typing import List, Optional, Dict, Any
-from src.prompter import ICDsModel
+from typing import List
+
 from pydantic import ValidationError
+
+from src.prompter import ICDsModel
 
 logger = logging.getLogger(__name__)
 
-def repair_json_truncation(json_str: str) -> str:
+
+class JSONExtractionError(ValueError):
+    """Raised when no valid prediction JSON can be extracted from a response."""
+
+
+def extract_last_json_object(text: str) -> str:
+    """Return the substring of `text` containing the last balanced top-level
+    JSON object (i.e. the last `{...}` block whose braces balance).
+
+    Scans backwards from the end of the string. Strings (with escape
+    handling) are skipped so that braces inside string literals are not
+    counted as structural.
+
+    Raises JSONExtractionError if no balanced `{...}` block exists.
     """
-    Attempts to repair a truncated JSON string by closing open structures.
-    Handles mid-string, mid-object, and mid-list truncation.
+    n = len(text)
+    # Walk from the end looking for closing braces; for each, find the
+    # matching opening brace and check that the slice parses as JSON.
+    i = n - 1
+    while i >= 0:
+        if text[i] == '}':
+            depth = 0
+            j = i
+            in_string = False
+            escape = False
+            while j >= 0:
+                ch = text[j]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif ch == '\\':
+                        escape = True
+                    elif ch == '"':
+                        in_string = False
+                else:
+                    if ch == '"':
+                        in_string = True
+                    elif ch == '}':
+                        depth += 1
+                    elif ch == '{':
+                        depth -= 1
+                        if depth == 0:
+                            candidate = text[j:i + 1]
+                            try:
+                                json.loads(candidate)
+                                return candidate
+                            except json.JSONDecodeError:
+                                # Not balanced/valid; keep scanning further left
+                                # for an earlier closing brace.
+                                break
+                j -= 1
+            i = j - 1
+        else:
+            i -= 1
+
+    raise JSONExtractionError(
+        f"No balanced JSON object found in response. Preview: {text[:300]!r}"
+    )
+
+
+def parse_prediction(response: str) -> ICDsModel:
+    """Parse an LLM response into an ICDsModel.
+
+    Extracts the last balanced JSON object and validates it. Raises on
+    failure (no repair, no regex extraction).
     """
-    json_str = json_str.strip()
-    if not json_str:
-        return json_str
+    if not response:
+        raise JSONExtractionError("Empty response.")
+    candidate = extract_last_json_object(response)
+    try:
+        return ICDsModel.model_validate_json(candidate)
+    except ValidationError as e:
+        raise JSONExtractionError(
+            f"Extracted JSON did not match ICDsModel schema: {e}\nCandidate: {candidate[:500]}"
+        ) from e
 
-    # 1. Close open strings
-    # We count unescaped double quotes
-    quotes = 0
-    i = 0
-    while i < len(json_str):
-        if json_str[i] == '"':
-            if i == 0 or json_str[i-1] != '\\':
-                quotes += 1
-        i += 1
-    
-    if quotes % 2 != 0:
-        json_str += '"'
 
-    # 2. Close brackets and braces using a stack-based approach
-    stack = []
-    i = 0
-    # Re-scan to find balance (this is more robust than counting)
-    in_string = False
-    while i < len(json_str):
-        char = json_str[i]
-        if char == '"' and (i == 0 or json_str[i-1] != '\\'):
-            in_string = not in_string
-        elif not in_string:
-            if char == '{':
-                stack.append('}')
-            elif char == '[':
-                stack.append(']')
-            elif char == '}':
-                if stack and stack[-1] == '}':
-                    stack.pop()
-            elif char == ']':
-                if stack and stack[-1] == ']':
-                    stack.pop()
-        i += 1
-    
-    # Append the necessary closing characters in reverse order
-    for closer in reversed(stack):
-        json_str += closer
-        
-    return json_str
-
-def safe_parse_json(text: str) -> List[str]:
-    """
-    Tries to parse the LLM output as JSON and extract the ICD codes.
-    Uses a multi-stage approach with specialized repair for truncation.
-    """
-    if not text:
-        logger.debug("safe_parse_json: empty text")
-        return []
-
-    # Pre-processing
-    original_text = text.strip()
-    logger.debug(f"safe_parse_json input (first 500ch): {original_text[:500]}")
-    logger.debug(f"safe_parse_json input (last 500ch): {original_text[-500:]}")
-    
-    def try_validate(candidate: str) -> Optional[List[str]]:
-        try:
-            # Stage A: Direct Pydantic validation
-            validated = ICDsModel.model_validate_json(candidate)
-            return [d.icd_code for d in validated.diagnoses if d.icd_code]
-        except (ValidationError, ValueError, json.JSONDecodeError):
-            try:
-                # Stage B: Repair common LLM mistakes (literal newlines/tabs)
-                repaired = candidate.replace('\n', '\\n').replace('\t', '\\t').replace('\r', '\\r')
-                validated = ICDsModel.model_validate_json(repaired)
-                return [d.icd_code for d in validated.diagnoses if d.icd_code]
-            except (ValidationError, ValueError, json.JSONDecodeError):
-                return None
-
-    # 1. Handle "Thinking" / Preamble blocks
-    # We isolate the JSON block by finding the first '{'
-    json_start = original_text.find('{')
-    if json_start != -1:
-        candidate = original_text[json_start:]
-    else:
-        candidate = original_text
-
-    # 2. Try parsing the candidate (which might be the full text or just the JSON start)
-    codes = try_validate(candidate)
-    
-    # 3. If failed, attempt truncation repair
-    if codes is None:
-        repaired_candidate = repair_json_truncation(candidate)
-        codes = try_validate(repaired_candidate)
-
-    # 4. Handle results
-    if codes is not None:
-        return codes
-    
-    # Final logging if all else fails
-    logger.debug(f"Failed to parse or validate JSON after repair. Preview (1000ch):\n{original_text[:1000]}")
-    return []
+def parse_prediction_codes(response: str) -> List[str]:
+    """Convenience wrapper returning just the predicted ICD code strings."""
+    model = parse_prediction(response)
+    return [d.icd_code for d in model.diagnoses]

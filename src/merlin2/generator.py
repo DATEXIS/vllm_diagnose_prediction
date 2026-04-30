@@ -1,11 +1,42 @@
-import asyncio
-import json
-import re
-from typing import Any, Dict, List, Optional
+"""MERLIN 2 Generator.
 
-from src.prompter import ICDsModel, get_schema
+Owns prompt construction (system + user + optional pre-filled <think>
+block) and response parsing. The Generator does NOT itself orchestrate
+iterations — that lives in Pipeline. One `generate_batch` call = one
+iteration across all live cases.
+
+There is no mock branch in the production code path. Tests should patch
+`_call_vllm_batch` (the only network boundary).
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
 from src.meta_verifier.schemas import Instruction
-from src.merlin2.prompts import BASE_PROMPT, THINKING_PROMPT, FINAL_PROMPT
+from src.prompter import ICDsModel, get_schema
+from src.utils.parsing_utils import JSONExtractionError, parse_prediction
+from src.utils.prompt_loader import GENERATOR_JSON_EXAMPLE, load_prompt
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GenerateRequest:
+    """One Generator job for one case at one iteration."""
+    admission_note: str
+    instructions: List[Instruction]                # may be empty (zero-shot)
+    previous_predicted_codes: List[str]            # used to fill the think block; may be empty
+
+
+@dataclass
+class GenerateResult:
+    prediction: ICDsModel
+    raw_response: str
+    prompt: str
+    parse_failed: bool = False  # True if the model returned no usable JSON
 
 
 class Generator:
@@ -21,120 +52,97 @@ class Generator:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.config = config
+        self.config = config or {}
 
-    def generate(
-        self, admission_note: str, instructions: Optional[List[Instruction]] = None
-    ) -> ICDsModel:
-        if instructions:
-            return self._generate_with_thinking(admission_note, instructions)
-        else:
-            return self._generate_simple(admission_note)
+    # ----------------------------------------------------------------- API
+    async def generate_batch(self, requests: List[GenerateRequest]) -> List[GenerateResult]:
+        """Run one iteration across the batch concurrently.
 
-    def _generate_simple(self, admission_note: str) -> ICDsModel:
-        prompt = BASE_PROMPT.format(admission_note=admission_note)
-        response = self._call_vllm(prompt)
-        return self._parse_response(response)
-
-    def _generate_with_thinking(
-        self, admission_note: str, instructions: List[Instruction]
-    ) -> ICDsModel:
-        prompt = BASE_PROMPT.format(admission_note=admission_note)
-        previous_prediction = None
-        thinking_blocks = []
-
-        for i, instruction in enumerate(instructions):
-            thinking_prompt = self._build_thinking_prompt(
-                instructions[: i + 1], previous_prediction
-            )
-            full_prompt = prompt + thinking_prompt
-            response = self._call_vllm(full_prompt)
-
-            thinking_content = self._extract_thinking_block(response)
-            thinking_blocks.append(thinking_content)
-
+        A malformed LLM response (no parseable JSON) does NOT crash the
+        batch: we log a warning, return an empty `ICDsModel` for that
+        case, and set `parse_failed=True`. The Pipeline halts the case
+        with `HaltReason.PARSE_FAILURE` on its next halt-check.
+        """
+        prompts = [self._build_prompt(req) for req in requests]
+        responses = await self._call_vllm_batch(prompts)
+        results: List[GenerateResult] = []
+        for prompt, raw in zip(prompts, responses):
             try:
-                previous_prediction = self._parse_response(response)
-            except Exception:
-                pass
-
-        final_prompt = prompt + "\n".join(thinking_blocks) + "\n\n" + FINAL_PROMPT
-        final_response = self._call_vllm(final_prompt)
-        return self._parse_response(final_response)
-
-    def _build_thinking_prompt(
-        self, instructions: List[Instruction], previous_prediction: str = None
-    ) -> str:
-        prompt_parts = []
-        for instruction in instructions:
-            prev_pred_text = f"Previous prediction: {previous_prediction}\n" if previous_prediction else ""
-            prompt_parts.append(
-                THINKING_PROMPT.format(
-                    instruction_id=instruction.id,
-                    contrastive_rule=instruction.contrastive_rule,
-                    previous_prediction=prev_pred_text,
+                prediction = parse_prediction(raw)
+                parse_failed = False
+            except JSONExtractionError as e:
+                logger.warning(
+                    f"Parse failure: {e}. Returning empty prediction for this case."
+                )
+                prediction = ICDsModel(diagnoses=[])
+                parse_failed = True
+            results.append(
+                GenerateResult(
+                    prediction=prediction,
+                    raw_response=raw,
+                    prompt=prompt,
+                    parse_failed=parse_failed,
                 )
             )
-        return "".join(prompt_parts)
+        return results
 
-    def _call_vllm(self, prompt: str) -> str:
-        """Call vLLM API. Uses inference.py if config provided, otherwise mock."""
-        if self.config is not None:
-            return asyncio.run(self._call_vllm_async(prompt))
-        else:
-            # Mock response for testing/development
-            sample_response = {
-                "diagnoses": [
-                    {
-                        "icd_code": "I10",
-                        "reason": "Patient presents with elevated blood pressure readings consistent with essential hypertension.",
-                    },
-                    {
-                        "icd_code": "E11.9",
-                        "reason": "Documented history of type 2 diabetes mellitus with elevated HbA1c values.",
-                    },
-                ]
-            }
-            return json.dumps(sample_response)
+    # --------------------------------------------------------- prompt build
+    def _build_prompt(self, req: GenerateRequest) -> str:
+        system = load_prompt("generator_system").format(json_example=GENERATOR_JSON_EXAMPLE)
+        user = load_prompt("generator_user").format(admission_note=req.admission_note)
+        think_block = self._build_think_block(req.instructions, req.previous_predicted_codes)
+        # Order: system | user | optional pre-filled think block.
+        # The think block is presented as "assistant scratch reasoning"
+        # appended after the user turn so the Generator continues from it.
+        if think_block:
+            return f"{system}\n\n{user}\n{think_block}\n"
+        return f"{system}\n\n{user}\n"
 
-    async def _call_vllm_async(self, prompt: str) -> str:
-        """Async call to vLLM using inference.py."""
-        from src.inference import build_payload, run_inference
+    def _build_think_block(
+        self,
+        instructions: List[Instruction],
+        previous_predicted_codes: List[str],
+    ) -> str:
+        if not instructions:
+            return ""
+        line_template = load_prompt("think_instruction_line")
+        lines = "".join(
+            line_template.format(
+                instruction_id=instr.instruction_id,
+                type=instr.type,
+                target_codes=",".join(instr.target_codes),
+                instruction_text=instr.instruction_text,
+            )
+            for instr in instructions
+        ).rstrip()
+        block = load_prompt("think_block").format(
+            previous_codes=", ".join(previous_predicted_codes) if previous_predicted_codes else "(none)",
+            instruction_lines=lines,
+        )
+        return block
 
-        schema = get_schema() if self.config.get('inference', {}).get('guided_decoding', False) else None
-        
-        # Build config with current generator settings
+    # ---------------------------------------------------------- vLLM bridge
+    async def _call_vllm_batch(self, prompts: List[str]) -> List[str]:
+        """Send `prompts` concurrently to the vLLM server."""
+        from src.inference import run_inference
+
+        guided = self.config.get("inference", {}).get("guided_decoding", False)
+        schema = get_schema() if guided else None
+
         cfg = {
-            'model': {
-                'name': self.model,
-                'api_base': self.api_base,
+            "model": {"name": self.model, "api_base": self.api_base},
+            "inference": {
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "guided_decoding": guided,
+                "concurrency": self.config.get("inference", {}).get("concurrency", 64),
             },
-            'inference': {
-                'temperature': self.temperature,
-                'max_tokens': self.max_tokens,
-                'guided_decoding': self.config.get('inference', {}).get('guided_decoding', False),
-                'concurrency': 1,
-            },
-            'job_name': self.config.get('job_name', 'local'),
-            'k8s': self.config.get('k8s', {}),
+            "job_name": self.config.get("job_name", "local"),
+            "k8s": self.config.get("k8s", {}),
         }
-        
-        responses = await run_inference(cfg, [prompt], schema)
-        if responses and responses[0]:
-            return responses[0]
-        raise RuntimeError("vLLM inference returned empty response")
-
-    def _parse_response(self, response: str) -> ICDsModel:
-        json_match = re.search(r"\{[\s\S]*\}", response)
-        if not json_match:
-            raise ValueError("No JSON found in response")
-        json_str = json_match.group()
-        data = json.loads(json_str)
-        return ICDsModel(**data)
-
-    def _extract_thinking_block(self, response: str) -> str:
-        thinking_pattern = r"<thinking>(.*?)</thinking>"
-        matches = re.findall(thinking_pattern, response, re.DOTALL)
-        if matches:
-            return "<thinking>" + matches[-1] + "</thinking>"
-        return ""
+        responses = await run_inference(cfg, prompts, schema)
+        if len(responses) != len(prompts):
+            raise RuntimeError(
+                f"vLLM returned {len(responses)} responses for {len(prompts)} prompts"
+            )
+        return responses

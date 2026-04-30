@@ -1,10 +1,7 @@
-"""Meta-Verifier: Generates contrastive instructions from experiment results."""
-from src.meta_verifier.schemas import Instruction, ErrorType, RichErrorInstruction
-from src.meta_verifier.meta_verifier import MetaVerifier
+"""Meta-Verifier package.
 
-__all__ = [
-    "Instruction",
-    "ErrorType",
-    "RichErrorInstruction",
-    "MetaVerifier",
-]
+Lightweight init: importing the package no longer pulls in the LLM /
+embedding stack. Consumers should import the specific submodule they
+need (`from src.meta_verifier.schemas import Instruction`,
+`from src.meta_verifier.meta_verifier import MetaVerifier`, etc).
+"""

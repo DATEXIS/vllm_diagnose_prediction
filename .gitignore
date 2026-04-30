@@ -107,6 +107,7 @@ venv.bak/
 
 # Data sets 
 data/mimic/
+data/mimic-iv/
 
 # Spyder project settings
 .spyderproject

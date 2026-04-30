@@ -1,175 +1,97 @@
+"""Tests for the Generator (prompt construction + response parsing).
+
+Network is mocked at `_call_vllm_batch`, the only IO boundary.
+"""
+
 import json
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import patch, MagicMock
 
-from src.merlin2.generator import Generator
-from src.prompter import ICDsModel
-from src.meta_verifier.schemas import Instruction
+from src.merlin2.generator import Generator, GenerateRequest
+from src.meta_verifier.schemas import Instruction, InstructionType
 
 
-class TestGeneratorInitialization:
-    def test_default_initialization(self):
+def _payload(codes):
+    return json.dumps({"diagnoses": [{"icd_code": c, "reason": "r"} for c in codes]})
+
+
+def _mk_instruction(id_=1, text="prefer X over Y", target=("E11",)):
+    return Instruction(
+        instruction_id=id_,
+        type=InstructionType.CONTRASTIVE_SWAP,
+        instruction_text=text,
+        description="cue",
+        target_codes=list(target),
+        source_hadm_ids=["1"],
+    )
+
+
+class TestPromptBuilding:
+    def test_zero_shot_has_no_think_block(self):
         gen = Generator()
-        assert gen.api_base == "http://localhost:8000/v1"
-        assert gen.model == "meta-llama/Llama-3.1-8B-Instruct"
-        assert gen.temperature == 0.0
-        assert gen.max_tokens == 1024
-
-    def test_custom_initialization(self):
-        gen = Generator(
-            api_base="http://custom:8000/v1",
-            model="custom/model",
-            temperature=0.5,
-            max_tokens=2048
+        prompt = gen._build_prompt(
+            GenerateRequest(admission_note="note", instructions=[], previous_predicted_codes=[])
         )
-        assert gen.api_base == "http://custom:8000/v1"
-        assert gen.model == "custom/model"
-        assert gen.temperature == 0.5
-        assert gen.max_tokens == 2048
+        assert "<think>" not in prompt
+        assert "note" in prompt
 
-
-class TestGeneratorGenerate:
-    @patch.object(Generator, '_call_vllm')
-    def test_generate_without_instructions(self, mock_call_vllm):
-        mock_call_vllm.return_value = json.dumps({
-            "diagnoses": [
-                {"icd_code": "I10", "reason": "Hypertension"}
-            ]
-        })
+    def test_with_instructions_includes_think_block(self):
         gen = Generator()
-        result = gen.generate("Patient has high blood pressure")
-        assert isinstance(result, ICDsModel)
-        assert len(result.diagnoses) == 1
-        assert result.diagnoses[0].icd_code == "I10"
-
-    @patch.object(Generator, '_call_vllm')
-    def test_generate_with_instructions(self, mock_call_vllm):
-        mock_call_vllm.return_value = json.dumps({
-            "diagnoses": [
-                {"icd_code": "I10", "reason": "Hypertension"}
-            ]
-        })
-        gen = Generator()
-        instruction = Instruction(
-            id=1,
-            target_code="I10",
-            contrastive_rule="Check for hypertension",
-            fpr=0.1,
-            fnr=0.2,
-            efficacy_score=0.8
+        prompt = gen._build_prompt(
+            GenerateRequest(
+                admission_note="note",
+                instructions=[_mk_instruction(text="prefer E11.4 over E11.9")],
+                previous_predicted_codes=["E11"],
+            )
         )
-        result = gen.generate("Patient has high blood pressure", instructions=[instruction])
-        assert isinstance(result, ICDsModel)
-        assert len(result.diagnoses) == 1
+        assert "<think>" in prompt
+        assert "</think>" in prompt
+        assert "prefer E11.4 over E11.9" in prompt
+        assert "E11" in prompt  # previous_predicted_codes line
 
-
-class TestBuildThinkingPrompt:
-    def test_thinking_block_format(self):
+    def test_multiple_instructions_render_one_line_each(self):
         gen = Generator()
-        instruction = Instruction(
-            id=1,
-            target_code="I10",
-            contrastive_rule="Consider essential hypertension",
-            fpr=0.1,
-            fnr=0.2,
-            efficacy_score=0.8
+        prompt = gen._build_prompt(
+            GenerateRequest(
+                admission_note="note",
+                instructions=[
+                    _mk_instruction(id_=1, text="rule one"),
+                    _mk_instruction(id_=2, text="rule two"),
+                ],
+                previous_predicted_codes=["E11"],
+            )
         )
-        prompt = gen._build_thinking_prompt([instruction])
-        assert "<thinking>" in prompt
-        assert "</thinking>" in prompt
-        assert "Instruction 1: Consider essential hypertension" in prompt
-        assert "Applying to prediction..." in prompt
+        assert "rule one" in prompt
+        assert "rule two" in prompt
 
-    def test_thinking_block_with_previous_prediction(self):
+
+class TestGenerateBatch:
+    @pytest.mark.asyncio
+    async def test_returns_parsed_predictions(self):
         gen = Generator()
-        instruction = Instruction(
-            id=1,
-            target_code="I10",
-            contrastive_rule="Consider essential hypertension",
-            fpr=0.1,
-            fnr=0.2,
-            efficacy_score=0.8
+        with patch.object(Generator, "_call_vllm_batch") as mock_call:
+            mock_call.return_value = [_payload(["I10"]), _payload(["E11"])]
+            results = await gen.generate_batch(
+                [
+                    GenerateRequest(admission_note="a", instructions=[], previous_predicted_codes=[]),
+                    GenerateRequest(admission_note="b", instructions=[], previous_predicted_codes=[]),
+                ]
+            )
+        assert [r.prediction.diagnoses[0].icd_code for r in results] == ["I10", "E11"]
+        assert [r.raw_response for r in results] == [_payload(["I10"]), _payload(["E11"])]
+
+    @pytest.mark.asyncio
+    async def test_picks_last_json_when_response_has_thinking(self):
+        gen = Generator()
+        first = _payload(["WRONG"])
+        last = _payload(["I10"])
+        response_with_thinking = (
+            f"<think>I considered {first} but...</think>\nFinal: {last}"
         )
-        prompt = gen._build_thinking_prompt(
-            [instruction],
-            previous_prediction='{"diagnoses": [{"icd_code": "I10"}]}'
-        )
-        assert "Previous prediction" in prompt
-
-    def test_multiple_instructions(self):
-        gen = Generator()
-        instructions = [
-            Instruction(id=1, target_code="I10", contrastive_rule="Rule 1", fpr=0.1, fnr=0.2, efficacy_score=0.8),
-            Instruction(id=2, target_code="E11.9", contrastive_rule="Rule 2", fpr=0.1, fnr=0.2, efficacy_score=0.8),
-        ]
-        prompt = gen._build_thinking_prompt(instructions)
-        assert prompt.count("<thinking>") == 2
-        assert "Instruction 1: Rule 1" in prompt
-        assert "Instruction 2: Rule 2" in prompt
-
-
-class TestParseResponse:
-    def test_valid_json(self):
-        gen = Generator()
-        response = json.dumps({
-            "diagnoses": [
-                {"icd_code": "I10", "reason": "Hypertension"},
-                {"icd_code": "E11.9", "reason": "Diabetes"}
-            ]
-        })
-        result = gen._parse_response(response)
-        assert isinstance(result, ICDsModel)
-        assert len(result.diagnoses) == 2
-
-    def test_invalid_json(self):
-        gen = Generator()
-        response = "This is not JSON"
-        with pytest.raises(ValueError, match="No JSON found in response"):
-            gen._parse_response(response)
-
-    def test_malformed_json(self):
-        gen = Generator()
-        response = '{"diagnoses": [{"icd_code": "I10"}]'
-        with pytest.raises(json.JSONDecodeError):
-            gen._parse_response(response)
-
-
-class TestThinkingBlocksContainContrastiveRule:
-    @patch.object(Generator, '_call_vllm')
-    def test_thinking_blocks_contain_contrastive_rule(self, mock_call_vllm):
-        mock_call_vllm.return_value = json.dumps({
-            "diagnoses": [
-                {"icd_code": "I10", "reason": "Hypertension"}
-            ]
-        })
-        gen = Generator()
-        instruction = Instruction(
-            id=1,
-            target_code="I10",
-            contrastive_rule="Check for elevated blood pressure readings",
-            fpr=0.1,
-            fnr=0.2,
-            efficacy_score=0.8
-        )
-        thinking_prompt = gen._build_thinking_prompt([instruction])
-        assert "Check for elevated blood pressure readings" in thinking_prompt
-
-    @patch.object(Generator, '_call_vllm')
-    def test_thinking_blocks_contain_rule_in_generate(self, mock_call_vllm):
-        mock_call_vllm.return_value = json.dumps({
-            "diagnoses": [
-                {"icd_code": "I10", "reason": "Hypertension"}
-            ]
-        })
-        gen = Generator()
-        instruction = Instruction(
-            id=1,
-            target_code="I10",
-            contrastive_rule="Verify hypertension diagnosis",
-            fpr=0.1,
-            fnr=0.2,
-            efficacy_score=0.8
-        )
-        gen.generate("Patient has high blood pressure", instructions=[instruction])
-        call_args = mock_call_vllm.call_args_list[0][0][0]
-        assert "Verify hypertension diagnosis" in call_args
+        with patch.object(Generator, "_call_vllm_batch") as mock_call:
+            mock_call.return_value = [response_with_thinking]
+            results = await gen.generate_batch(
+                [GenerateRequest(admission_note="a", instructions=[], previous_predicted_codes=[])]
+            )
+        assert results[0].prediction.diagnoses[0].icd_code == "I10"

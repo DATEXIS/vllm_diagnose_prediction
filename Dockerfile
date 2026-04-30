@@ -13,9 +13,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code and data
+# Copy the application code, prompt templates, and data.
+# /app/config/config.yaml is mounted by the K8s ConfigMap; /app/configs/
+# (the prompts directory) ships with the image so prompt_loader.py can find it.
 COPY src/ src/
-COPY data/ data/
+COPY configs/prompts/ configs/prompts/
+COPY data/mimic data/mimic
+COPY data/cooccurrence.parquet data/cooccurrence.parquet
 
 # Set Python to run unbuffered so logs appear immediately
 ENV PYTHONUNBUFFERED=1

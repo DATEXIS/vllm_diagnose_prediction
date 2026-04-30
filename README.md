@@ -126,6 +126,8 @@ python scripts/merlin_restart.py
 | :--- | :--- |
 | `patients_file` | Path to input Parquet file |
 | `target_col` | Column containing ground truth labels |
+| `admission_col` | Column containing clinical admission notes |
+| `discharge_col` | Column containing clinical discharge notes (optional, falls back to admission_col) |
 | `sample_size` | Rows to process (`null` for full dataset) |
 
 #### Model

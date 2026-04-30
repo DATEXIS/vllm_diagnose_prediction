@@ -1,69 +1,69 @@
-import sys
-import os
-import logging
+"""Tests for the minimal JSON parser.
 
-# Add src to path so we can import parsing_utils
-sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
+Contract:
+  * Find the LAST balanced top-level JSON object in the response.
+  * Validate it against ICDsModel.
+  * No repair, no regex fallbacks. Raise on invalid input.
+"""
 
-from src.utils.parsing_utils import safe_parse_json
+import json
 
-# Configure logging to see failures
-logging.basicConfig(level=logging.INFO)
+import pytest
 
-def test_parsing():
-    test_cases = [
-        {
-            "name": "Clean JSON",
-            "input": '{"diagnoses": [{"icd_code": "I10", "reason": "High blood pressure"}]}',
-            "expected": ["I10"]
-        },
-        {
-            "name": "Thinking + JSON",
-            "input": 'I have analyzed the note. Here are the codes: {"diagnoses": [{"icd_code": "E11.9", "reason": "Diabetes"}]}',
-            "expected": ["E11.9"]
-        },
-        {
-            "name": "Unescaped Newlines",
-            "input": '{"diagnoses": [{"icd_code": "K86.0", "reason": "Chronic pancreatitis\nPatient has symptoms"}]}',
-            "expected": ["K86.0"]
-        },
-        {
-            "name": "Truncated Mid-String (User Example)",
-            "input": '{"diagnoses": [{"icd_code": "K86.0", "reason": "The patient has a history of chronic pancreatitis, which is a known condition, and presents with worsening symptoms including nausea, vomiting, and ab',
-            "expected": ["K86.0"]
-        },
-        {
-            "name": "Truncated Mid-Object (Multiple Items)",
-            "input": '{"diagnoses": [{"icd_code": "I10", "reason": "BP"}, {"icd_code": "E11", "reason": "Diab',
-            "expected": ["I10", "E11"]
-        },
-        {
-            "name": "Deeply Truncated (Only Header)",
-            "input": '{"diagnoses": [',
-            "expected": []
-        }
-    ]
+from src.utils.parsing_utils import (
+    JSONExtractionError,
+    extract_last_json_object,
+    parse_prediction,
+    parse_prediction_codes,
+)
 
-    print("\n--- Running Parsing Tests ---")
-    passed = 0
-    for case in test_cases:
-        result = safe_parse_json(case["input"])
-        if result == case["expected"]:
-            print(f"[PASS] {case['name']}")
-            passed += 1
-        else:
-            print(f"[FAIL] {case['name']}")
-            print(f"       Input: {case['input'][:100]}...")
-            print(f"       Expected: {case['expected']}")
-            print(f"       Got:      {result}")
 
-    print(f"\nSummary: {passed}/{len(test_cases)} cases passed.")
-    
-    if passed == len(test_cases):
-        print("All tests passed! 🚀")
-    else:
-        print("Some tests failed. ❌")
-        sys.exit(1)
+def _payload(codes):
+    return json.dumps({"diagnoses": [{"icd_code": c, "reason": "r"} for c in codes]})
 
-if __name__ == "__main__":
-    test_parsing()
+
+class TestExtractLastJsonObject:
+    def test_clean_single_object(self):
+        s = _payload(["I10"])
+        assert extract_last_json_object(s) == s
+
+    def test_picks_last_when_multiple_objects(self):
+        first = _payload(["E11"])
+        last = _payload(["I10", "K35"])
+        s = f"thinking... {first}\nfinal: {last}"
+        assert extract_last_json_object(s) == last
+
+    def test_braces_inside_strings_are_ignored(self):
+        target = '{"diagnoses": [{"icd_code": "I10", "reason": "BP {high}"}]}'
+        assert extract_last_json_object(target) == target
+
+    def test_no_json_raises(self):
+        with pytest.raises(JSONExtractionError):
+            extract_last_json_object("just thinking, no JSON here")
+
+    def test_unbalanced_truncated_raises(self):
+        # Truncated payload, no closing brace at all.
+        with pytest.raises(JSONExtractionError):
+            extract_last_json_object('{"diagnoses": [{"icd_code": "I10"')
+
+
+class TestParsePrediction:
+    def test_valid_prediction(self):
+        s = _payload(["I10", "E11"])
+        model = parse_prediction(s)
+        assert [d.icd_code for d in model.diagnoses] == ["I10", "E11"]
+
+    def test_takes_last_block(self):
+        first = _payload(["E11"])
+        last = _payload(["I10"])
+        s = f"thinking... {first}\nactual: {last}"
+        assert parse_prediction_codes(s) == ["I10"]
+
+    def test_schema_mismatch_raises(self):
+        # Valid JSON, wrong shape.
+        with pytest.raises(JSONExtractionError):
+            parse_prediction(json.dumps({"not_diagnoses": []}))
+
+    def test_empty_response_raises(self):
+        with pytest.raises(JSONExtractionError):
+            parse_prediction("")

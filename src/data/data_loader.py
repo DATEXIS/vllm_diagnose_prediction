@@ -26,11 +26,20 @@ def load_patients(config: dict) -> pd.DataFrame:
     else:
         logger.info(f"Loaded {len(df)} patients.")
 
-    # Ensure required columns are present.
     target_col = config['data'].get('target_col', 'ICD_CODES')
-    required_cols = ['admission_note', target_col]
-    for col in required_cols:
-        if col not in df.columns:
-            logger.warning(f"Expected column '{col}' not found in data. Evaluation may fail.")
+    admission_col = config['data'].get('admission_col', 'admission_note')
+    discharge_col = config['data'].get('discharge_col', 'discharge_note')
+
+    rename_map = {}
+    if admission_col != 'admission_note' and admission_col in df.columns:
+        rename_map[admission_col] = 'admission_note'
+    if discharge_col and discharge_col != 'discharge_note' and discharge_col in df.columns:
+        rename_map[discharge_col] = 'discharge_note'
+    if target_col != 'ICD_CODES' and target_col in df.columns:
+        rename_map[target_col] = 'ICD_CODES'
+
+    if rename_map:
+        logger.info(f"Renaming columns: {rename_map}")
+        df = df.rename(columns=rename_map)
 
     return df

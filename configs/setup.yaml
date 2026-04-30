@@ -1,15 +1,18 @@
 # vLLM diagnose prediction - Setup configuration
-# Rarely changed (only when docker or wandb settings change)
+# Cluster / registry / wandb defaults shared across all experiments.
+# Rarely changed.
 
-# Docker configuration
 docker:
   registry: "registry.datexis.com/jfrick"
-  image_name: "vllm_diagnose_prediction"
+  image_name: "merlin_2"
   tag: "latest"
   platform: "linux/amd64"
-  server_image: "vllm/vllm-openai:v0.12.0"
+  server_image: "vllm/vllm-openai:v0.19.1"
 
-# WandB configuration (api_key from env var WANDB_API_KEY)
 wandb:
   project: "ICD-prediction"
   entity: "datexis-phd"
+
+k8s:
+  namespace: "jfrick"
+  image_pull_secrets: "private-registry-auth"

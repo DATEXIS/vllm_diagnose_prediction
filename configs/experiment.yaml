@@ -1,64 +1,84 @@
 # vLLM diagnose prediction - Experiment configuration
-# Changed per experiment/run (no server rebuild required for most params)
+# Changed per experiment/run (no server rebuild required for most params).
+# Cluster-wide settings (namespace, registry, wandb project, image pull
+# secret) live in setup.yaml; settings hardcoded into k8s_templates.py
+# do not appear here either.
 
 # Run identification
-job_name: "test-run"
-run_name: "qwen8b-guided-decoding"
+job_name: "merlin2"
+run_name: "merlin2-opus-code"
 
-# Logging level
 log_level: "INFO"
 
 # Inference parameters
 inference:
   temperature: 0.2
-  max_tokens: 2000
-  concurrency: 10
-  guided_decoding: True
+  max_tokens: 3000
+  reasoning_budget: 1024
+  concurrency: 64
+  guided_decoding: false
 
 # Dataset configuration
 data:
-  patients_file: "data/mimic/patients_1411.pq"
+  patients_file: "data/mimic/hosp_icd10_train.pq"
   target_col: "ICD_CODES"
-  sample_size: 100
+  admission_col: "admission_note"
+  discharge_col: "discharge_note"     # used by Meta-Verifier only
+  sample_size: 50
 
 # Model configuration
 model:
-  name: "Qwen/Qwen3-8B"
+  name: "Qwen/Qwen3-32B"
   max_model_len: 16384
-  max_num_seqs: 256
-  max_num_batched_tokens: 2048
+  max_num_seqs: 1024
+  max_num_batched_tokens: 131072
   enable_chunked_prefill: true
 
-# Kubernetes cluster configuration
+# Per-experiment K8s overrides (namespace + image_pull_secrets are in setup.yaml)
 k8s:
-  namespace: "jfrick"
-  image_pull_secrets: "private-registry-auth"
-
   server:
     gpu_count: 1
-    gpu_type: "a100"
-    memory_limit: "64Gi"
-    memory_request: "16Gi"
-
+    gpu_type: "b200"
+    memory_limit: "1024Gi"
   client:
-    memory_limit: "16Gi"
-    memory_request: "4Gi"
+    memory_limit: "256Gi"
 
-# MERLIN 2 configuration
+# MERLIN 2 configuration -- defaults locked per MERLIN2_SPEC.md §6.
 merlin2:
-  enabled: false
-  sim_threshold: 0.7
-  fpr_threshold: 0.1
-  fnr_threshold: 0.1
-  max_tokens_budget: 512
+  enabled: true
+  sim_threshold: 0.8
+  fpr_threshold: 0.5
+  fnr_threshold: 0.5
+  min_support: 3
+  convergence_threshold: 0.9
   max_iterations: 5
-  convergence_threshold: 0.95
+  max_tokens_budget: 2500
+  learning_rate: 1.2
+  instructions_path: "data/instructions.parquet"
+  # Wandb artifact roundtrip for the instruction store.
+  # On startup: pull this artifact (if it exists) into instructions_path,
+  # overwriting any local copy. After Loop B: log a new version iff
+  # the Meta-Verifier minted at least one new instruction.
+  instructions_artifact_name: "instructions_db"
+  instructions_artifact_version: "latest"
+  # Co-occurrence (FN retrieval). Built once per train split via
+  # `python scripts/build_cooccurrence.py --config configs/experiment.yaml`.
+  # `cooccurrence_threshold` is a *lift* threshold (P(a,b)/(P(a)P(b))).
+  cooccurrence_path: "data/cooccurrence.parquet"
+  cooccurrence_threshold: 3.0
+  cooccurrence_top_k: 20
+  cooccurrence_min_joint_count: 3
+  # Per-code threshold-warning stats. Loop B writes new entries; the
+  # Retriever synthesises FP/FN warning text at runtime from these.
+  # Frozen-rate semantics: codes already in the table are not overwritten
+  # on subsequent Loop-B passes (per MERLIN2_SPEC §3).
+  code_stats_path: "data/code_stats.parquet"
+  code_stats_artifact_name: "code_stats"
+  code_stats_artifact_version: "latest"
 
-# Meta-Verifier configuration (for instruction generation)
+# Meta-Verifier (Loop B) -- toggle to mint instructions after a Loop-A pass.
 meta_verifier:
-  enabled: false  # Enable to generate contrastive instructions from results
-  embedding_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract"  # Model for semantic embeddings
-  min_error_count: 3  # Min errors before generating an instruction
-  efficacy_threshold: 0.1  # Min efficacy score for instructions
-  upload_results: true  # Upload generated instructions to wandb
-  download_run_name: null  # Download instructions from previous run (null = none)
+  enabled: True
+  embedding_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
+  temperature: 0.4
+  max_tokens: 2000

@@ -1,51 +1,32 @@
-from typing import List, Dict, Any, Optional
+"""Pydantic schemas for the Generator's structured output.
+
+Prompt construction lives in `src.merlin2.generator` (templates in
+`configs/prompts/`); this module owns only the schema.
+"""
+
+from typing import Any, Dict, List
+
 from pydantic import BaseModel, Field
-import pandas as pd
+
 
 class ICDPrediction(BaseModel):
     icd_code: str = Field(description="The ICD code for the diagnosis.")
-    reason: str = Field(description="Clinical reasoning for assigning this code based on the admission note.")
-    quote: Optional[str] = Field(default=None, description="Clinical evidence excerpt from note.")
+    reason: str = Field(
+        description="Clinical reasoning for assigning this code based on the admission note."
+    )
+
 
 class ICDsModel(BaseModel):
     diagnoses: List[ICDPrediction] = Field(
-        description="A list of predicted ICD codes with clinical reasoning."
+        description="A list of predicted ICD codes with clinical reasoning.",
+        max_length=15,
     )
 
-def build_prompt(patient: Dict[str, Any]) -> str:
-    """
-    Constructs the prompt for the language model.
-    Assumes 'admission_note' is in the patient dictionary.
-    """
-    admission_note = patient.get('admission_note', 'No note available.')
-    
-    json_example = '''{
-  "diagnoses": [
-    {"icd_code": "I10", "reason": "Patient has persistent hypertension noted in the admission note."},
-    {"icd_code": "E11.9", "reason": "Elevated blood glucose levels indicating type 2 diabetes mellitus."}
-  ]
-}'''
-
-    system_instruction = (
-        "You are an expert medical coder. Your task is to extract all relevant "
-        "diagnoses from the provided medical admission note and assign the most appropriate "
-        "ICD (International Classification of Diseases) codes for each. "
-        "Provide a concise reason (1-2 sentences) for each assigned ICD code based on the clinical evidence in the text.\n"
-        f"Output your diagnoses as a JSON object following this schema:\n{json_example}"
-    )
-
-    prompt = f"{system_instruction}\n\n### Admission Note:\n{admission_note}\n\n### Output:\n"
-    return prompt
-
-def build_prompts(df: pd.DataFrame) -> List[str]:
-    """Builds a list of prompts from a dataframe of patients."""
-    patient_dicts = df.to_dict(orient="records")
-    return [build_prompt(patient) for patient in patient_dicts]
 
 def get_schema() -> Dict[str, Any]:
-    """Returns the JSON schema for guided decoding."""
+    """JSON schema for vLLM guided decoding."""
     return {
         "name": ICDsModel.__name__,
         "schema": ICDsModel.model_json_schema(),
-        "strict": True
+        "strict": True,
     }
