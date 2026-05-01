@@ -19,34 +19,42 @@
 * **Role:** Asynchronous clinical auditor and taxonomy author. **Runs only on training data.** Never used at test time.
 * **Model:** Same vLLM-served model as the Generator (for now). The task is easier than coding from scratch because M sees the answer.
 * **Inputs (per case):** `admission_note`, `prediction` (the Generator's final JSON), `ground_truth_codes`, `discharge_note`, `hadm_id`. The discharge note is the new signal not available at inference time.
-* **Hard constraint — no leakage into instructions:** Instructions must be useful for a Generator that *never sees the discharge note*. The Meta-Verifier prompt must explicitly forbid instructions of the form *"the discharge note mentions X"* or *"you should have read the discharge note"*. Instructions must be grounded in cues that exist in the **admission note** (or in the predicted code itself, for FPR/FNR instructions).
+* **Hard constraint — no leakage into case-level instructions:** Persisted instructions must be useful for a Generator that *never sees the discharge note*. The Meta-Verifier prompt must explicitly forbid LLM outputs of the form *"the discharge note mentions X"* or *"you should have read the discharge note"*. Each persisted instruction must be grounded in cues that exist in the **admission note**. (Synthesised threshold warnings have no leakage risk — their text is generated from `code_stats` by deterministic templates and references the predicted / cooccurring code only.)
 * **Prompt:** Lives in `configs/` (not in code) so it can be iterated without rebuilds. Starts basic — accepts the four inputs, requests JSON output conforming to the Instruction Schema, includes the leakage prohibition. Iterated empirically once we see the first batch of generated instructions.
-* **Two error-discovery paths:**
-  1. **Case-level analysis (semantic instructions):** Compares prediction against ground truth + discharge note, identifies root causes, writes contrastive instructions to be retrieved later by **semantic similarity** to the admission note. May relate to multiple ICD codes.
-  2. **Aggregate metrics (threshold instructions):** Computes per-code FPR/FNR over historical predictions. When a code's FPR or FNR exceeds a threshold, writes an instruction tied to that **single ICD code** (e.g., *"You predicted I10, but I10 has a historical FPR of 78% — re-examine whether this code is truly supported"*).
-* **Instruction Schema:**
-  * `instruction_id` — primary key
-  * `type` — `contrastive_swap`, `fp_warning`, `fn_warning`, etc. (used for clustering / dedup)
+* **Two error-discovery paths, two different sinks:**
+  1. **Case-level analysis (semantic instructions):** Compares prediction against ground truth + discharge note, identifies root causes, writes contrastive instructions to be retrieved later by **semantic similarity** to the admission note. May relate to multiple ICD codes. Output: rows appended to `instructions.parquet`.
+  2. **Aggregate metrics (per-code threshold rules):** Computes per-code FPR/FNR over the audit batch. When a code's FPR or FNR exceeds a threshold AND meets `min_support`, emits a row to a separate per-code stats table (`code_stats.parquet`) — *not* an Instruction row. The Retriever synthesises the warning text at runtime from the stats; nothing is persisted in the instruction store. A code already present in `code_stats.parquet` is left untouched (frozen-rate semantics, see §3).
+* **Instruction Schema (persistent rows in `instructions.parquet`):**
+  * `instruction_id` — primary key. Sequential int.
+  * `type` — `semantic` or `contrastive_swap`. Threshold-warning types (`fp_warning`, `fn_warning`) are reserved for runtime-synthesised instances and never appear in the persistent store.
   * `instruction_text` — the thinking-style content injected into the Generator's `<think>` block
   * `description` / `quote` — short text used as the embedding target for semantic retrieval (PubMedBERT)
-  * `target_codes` — 3-digit ICD codes the instruction relates to. Threshold instructions: exactly one. Semantic instructions: one or more.
-  * `source_hadm_ids` — list of `hadm_id`s the instruction was derived from. Required for semantic instructions; empty/null for FPR/FNR instructions (those are derived from aggregate stats, not a specific case).
-  * `fpr_at_creation`, `fnr_at_creation` — for threshold instructions only. The frozen metric snapshot used at retrieval time. Null for semantic instructions.
+  * `target_codes` — 3-digit ICD codes the instruction relates to (one or more).
+  * `source_hadm_ids` — list of `hadm_id`s the instruction was derived from. Non-empty for case-level instructions.
   * `efficacy_score` — running score; see *Efficacy Score Update Rule* below.
+* **CodeStats Schema (rows in `code_stats.parquet`):**
+  * `code` — 3-digit ICD code (primary key).
+  * `fpr` / `fnr` — frozen rate snapshot from the Loop-B pass that first registered this code. Exactly one of the two is set; the other is null.
+  * `support_pred` / `support_true` — case counts from the same pass, used for the runtime warning text.
+  * No `efficacy_score`. Synthesised threshold warnings have no per-warning efficacy (see *Efficacy Score Update Rule*).
 * **FPR / FNR definitions (3-digit code level):**
   * `FPR(c) = (# cases where c was predicted but not in ground truth) / (# cases where c was predicted)`
   * `FNR(c) = (# cases where c was in ground truth but not predicted) / (# cases where c was in ground truth)`
-  * Codes below a minimum-support count are not eligible for threshold instructions (rates are too noisy).
+  * Codes below a minimum-support count are not eligible for `code_stats` rows (rates are too noisy).
 
 ### Hybrid-Retriever (R)
 * **Role:** The memory fetcher during active inference.
 * **Embedding model:** **PubMedBERT** (`microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext` or equivalent S-PubMedBERT variant) for both admission notes and instruction `description`/`quote` fields.
-* **Two retrieval paths (OR'd together):**
-  * **Semantic path:** embed the admission note, fetch instructions whose `description`/`quote` embedding has cosine similarity ≥ `sim_threshold`.
-  * **Threshold path:** for each 3-digit code in the *previous iteration's* prediction, fetch instructions whose `target_codes` include that code AND whose recorded `fpr_at_creation ≥ fpr_threshold` or `fnr_at_creation ≥ fnr_threshold`. Inactive at `t=0` (no prior prediction yet).
-* **Behavior at t=0:** The Generator runs **zero-shot** — no instructions retrieved, no `<think>` block prefilled. This produces a baseline prediction. From `t=1` onward, both retrieval paths are active.
-* **Deduplication:** Instructions retrieved in earlier iterations of the same case are excluded from later iterations (but the originals stay in the prompt — see *Efficacy Score Update Rule*).
-* **Budgeting:** Caps retrieval at `max_tokens_budget`, prioritizing instructions with the highest `efficacy_score`.
+* **Inputs at construction time:** the persistent instructions list (from `instructions.parquet`), the per-code stats lookup (from `code_stats.parquet`), and the cooccurrence index (from `cooccurrence.parquet`, see *Cooccurrence Index* below).
+* **Three retrieval paths, all OR'd at the per-instruction level:**
+  * **Semantic path:** embed the admission note, fetch persistent instructions whose `description`/`quote` embedding has cosine similarity ≥ `sim_threshold`.
+  * **FP gate (threshold, runtime-synthesised):** for each 3-digit code in the *previous iteration's* prediction, look up `code_stats[code].fpr`. If it is ≥ `fpr_threshold`, synthesise an `fp_warning` Instruction at retrieval time and emit it. Synthesised IDs are deterministic (md5 hash of `"fp_<code>"`, high-bit set) so the same warning keeps the same ID across iterations.
+  * **FN gate (threshold, runtime-synthesised, cooccurrence-driven):** expand the previous prediction via the cooccurrence index — for each predicted code, take the top-`cooccurrence_top_k` codes with `lift ≥ cooccurrence_threshold`. For each candidate in that expanded set, look up `code_stats[code].fnr`. If it is ≥ `fnr_threshold`, synthesise an `fn_warning` Instruction. The asymmetry with the FP gate is deliberate: an FN warning is about a code the model *should have* predicted but didn't, so gating on the predicted set would make it unreachable.
+  * Both threshold gates are inactive at `t=0` (no prior prediction yet).
+* **Cooccurrence Index:** `lift(a, b) = N · joint(a,b) / (count(a) · count(b))` over training-set 3-digit ground-truth co-occurrence. Built once per train split via `scripts/build_cooccurrence.py`, frozen for retrieval. `min_joint_count` and `min_support` filter noise. Lift naturally biases toward rare codes via the `count(b)` denominator; no separate rare-code re-ranking is applied.
+* **Behavior at t=0:** The Generator runs **zero-shot** — no instructions retrieved, no `<think>` block prefilled. This produces a baseline prediction. From `t=1` onward, all three retrieval paths are active.
+* **Deduplication:** Instructions retrieved in earlier iterations of the same case are excluded from later iterations (but the originals stay in the prompt — see *Efficacy Score Update Rule*). Synthesised threshold warnings participate in dedup via their deterministic IDs.
+* **Budgeting:** Caps retrieval at `max_tokens_budget`, prioritising instructions with the highest `efficacy_score`. Synthesised threshold warnings always have `efficacy_score = 0.0`, so they only beat ineffective semantic instructions in priority order.
 
 ### Verifier (V)
 * **Role:** Synchronous traffic controller.
@@ -55,7 +63,7 @@
 ### Efficacy Score Update Rule
 
 * **Granularity:** scores update **per iteration**, after the Generator produces prediction `P_t`.
-* **Rewarded set:** only the instructions retrieved **fresh at iteration `t`** receive a score update for that iteration. Instructions carried over from earlier iterations stay in the prompt but no longer accumulate reward — they had their chance.
+* **Rewarded set:** only the persistent (semantic / contrastive) instructions retrieved **fresh at iteration `t`** receive a score update. Instructions carried over from earlier iterations stay in the prompt but no longer accumulate reward — they had their chance. Synthesised threshold warnings (`fp_warning` / `fn_warning`) are never rewarded: their `efficacy_score` is permanently `0.0`. They fire whenever the gate triggers, full stop. This is a deliberate simplification over per-warning efficacy tracking.
 * **Reward signal:** `delta_F1 = F1(P_t) − F1(P_{t−1})`, computed against ground truth at the case level.
 * **Frequency-aware F1:** rare codes contribute more to the reward than common codes. Implemented simply: each sample in the patient file carries a precomputed `rareness_factor` (derived from training-set ICD-code frequencies in a separate preprocessing step). The reward signal is multiplied by this factor — no in-loop frequency lookup table needed.
 * **Update:** for each freshly retrieved instruction `i` at iteration `t`:
@@ -86,9 +94,9 @@
 4. **Halting:** Loop repeats until the Verifier (V) signals convergence.
 
 ### Loop B: Asynchronous Knowledge Acquisition (Global Memory)
-1. **Audit (case-level):** For each closed case, Meta-Verifier reads `(admission_note, prediction, ground_truth, discharge_note)` and emits contrastive instructions for missed or hallucinated codes.
-2. **Audit (aggregate):** Recompute per-code FPR/FNR over the audited cases; for codes that cross the threshold (and meet minimum support), emit threshold instructions.
-3. **Database Maintenance:** A clustering routine groups instructions by `target_codes` and `type`. Redundant instructions are candidates for merge/summarization via LLM, combining their `efficacy_score`.
+1. **Audit (case-level):** For each closed case, Meta-Verifier reads `(admission_note, prediction, ground_truth, discharge_note)` and emits contrastive instructions for missed or hallucinated codes. These are appended to `instructions.parquet`.
+2. **Audit (aggregate):** Recompute per-code FPR/FNR over the audited cases; for codes that cross the threshold AND meet `min_support`, emit a row to `code_stats.parquet` (one row per code, one of `fpr` / `fnr` set). Codes already present in the table are left untouched — frozen-rate semantics. The Retriever synthesises the warning text at runtime; nothing about the warning is persisted in the instructions store.
+3. **Database Maintenance:** A clustering routine groups *persistent* instructions by `target_codes` and `type`. Redundant instructions are candidates for merge/summarisation via LLM, combining their `efficacy_score`. The `code_stats.parquet` table doesn't need clustering — it's already keyed by code.
    * **Open question (to be tested):** LLM-based merging may degrade the `description`/`quote` embedding such that semantic retrieval misses cases the originals would have caught. Treat merging as an ablation, not a default.
 
 ---
@@ -210,11 +218,17 @@ This approach makes the code easier to read and debug during research iterations
 
 | Component | File |
 |-----------|------|
-| **Generator (G)** | `src/generator.py` |
-| **Retriever (R)** | `src/retriever.py` |
-| **Verifier (V)** | `src/verifier.py` |
-| **Pipeline (Loop A orchestration)** | `src/run_inference.py` |
-| **Meta-Verifier (M)** | *(Loop B — not yet implemented)* |
+| **Generator (G)** | `src/merlin2/generator.py` |
+| **Retriever (R)** | `src/merlin2/retriever.py` |
+| **Verifier (V)** | `src/merlin2/verifier.py` |
+| **Pipeline (Loop A orchestration)** | `src/merlin2/pipeline.py` |
+| **Entry point (Loop A + Loop B driver)** | `src/main.py` |
+| **Meta-Verifier (M)** | `src/meta_verifier/meta_verifier.py` |
+| **Persistent instruction store** | `src/meta_verifier/store.py` (rows in `data/instructions.parquet`) |
+| **Per-code threshold stats** | `src/meta_verifier/code_stats.py` (rows in `data/code_stats.parquet`) |
+| **Cooccurrence index loader** | `src/utils/cooccurrence.py` (rows in `data/cooccurrence.parquet`) |
+| **Cooccurrence builder (preprocessing)** | `scripts/build_cooccurrence.py` |
+| **Wandb artifact roundtrip** | `src/utils/wandb_logger.py` (`instructions_db`, `code_stats` artifacts) |
 
 ### Default Configuration (Starting Values)
 
@@ -223,40 +237,67 @@ Tuned empirically from here; locked in as the first run's config.
 | Parameter | Value | Used by |
 |---|---|---|
 | `sim_threshold` | 0.8 | Retriever — semantic path (cosine similarity cutoff) |
-| `fpr_threshold` | 0.5 | Retriever — threshold path (FP warning trigger) |
-| `fnr_threshold` | 0.5 | Retriever — threshold path (FN warning trigger) |
-| `min_support` | 3 | Meta-Verifier — minimum case count before a code is eligible for FPR/FNR instructions |
+| `fpr_threshold` | 0.5 | Retriever — FP gate (synthesise fp_warning when `code_stats[c].fpr ≥ this`) |
+| `fnr_threshold` | 0.5 | Retriever — FN gate (synthesise fn_warning when `code_stats[c].fnr ≥ this`) |
+| `min_support` | 3 | Meta-Verifier — minimum case count before a code is eligible for a `code_stats` row |
+| `cooccurrence_threshold` | 3.0 | Retriever — minimum lift to admit a code into the FN candidate set |
+| `cooccurrence_top_k` | 20 | Retriever — top-K cap on cooccurring codes per predicted code (after threshold filter) |
+| `cooccurrence_min_joint_count` | 3 | Cooccurrence builder — minimum joint count per pair (noise filter) |
 | `convergence_threshold` | 0.9 | Verifier — Jaccard similarity between consecutive predictions to halt |
 | `max_iterations` | 5 | Verifier — hard cap on iterations per case |
 | `max_tokens_budget` | 2500 | Retriever — token cap for the `<think>` block |
 | `learning_rate` | 1.2 | Efficacy update — multiplier on `delta_F1_weighted` |
+| `instructions_artifact_name` | `instructions_db` | Wandb artifact lineage for `instructions.parquet` |
+| `instructions_artifact_version` | `latest` | Pin to a specific version (e.g. `v3`) for reproducibility ablations |
+| `code_stats_artifact_name` | `code_stats` | Wandb artifact lineage for `code_stats.parquet` |
+| `code_stats_artifact_version` | `latest` | Same pinning behaviour as the instructions artifact |
 
 ### Logging & Observability
 
 Every retrieval event must be logged with enough detail to later tune the thresholds and audit which path is doing the work:
 
 * `hadm_id`, iteration `t`
-* For each retrieved instruction: `instruction_id`, `retrieval_path` (`semantic` | `threshold_fpr` | `threshold_fnr`), the value that triggered it (cosine score, or `fpr_at_creation` / `fnr_at_creation`), and `efficacy_score` at retrieval time
+* For each retrieved instruction: `instruction_id`, `retrieval_path` (`semantic` | `threshold_fpr` | `threshold_fnr`), the value that triggered it (cosine similarity for `semantic`, the looked-up `code_stats[c].fpr` / `fnr` for the threshold paths), and `efficacy_score` at retrieval time (always `0.0` for synthesised threshold warnings)
 * Per-iteration aggregates: count and ratio of instructions retrieved by each path
-* Halting reason (one of `max_iterations`, `budget_exhausted`, `no_new_instructions`, `convergence`, `empty_db`)
-* `delta_F1` and the resulting score update (`delta_F1 * rareness_factor * learning_rate`) — training only
+* Halting reason (one of `max_iterations`, `budget_exhausted`, `no_new_instructions`, `convergence`, `empty_db`, `parse_failure`)
+* `delta_F1` and the resulting score update (`delta_F1 * rareness_factor * learning_rate`) — training only, applied only to persistent (non-threshold) instructions
 
 These logs are the basis for later adjusting `sim_threshold`, `fpr_threshold`, `fnr_threshold`, and `learning_rate` — in particular, if one retrieval path dominates or never fires, the thresholds are mis-tuned.
 
-### Instruction Storage
+### Storage
 
-For now, instructions live in a **Parquet file** (single columnar file, one row per instruction, columns matching the Instruction Schema above plus an `embedding` column of float32 vectors). Embeddings are loaded into memory at the start of each Loop A run; semantic retrieval is brute-force cosine similarity. At the end of each Loop B run, the file is rewritten with updated efficacy scores and any new instructions appended.
+Three Parquet files, three different lifecycles:
 
-Re-evaluation candidates (see open question below): SQLite for cheap row-level updates, or DuckDB on top of the same Parquet for SQL access without changing the storage substrate.
+* **`data/instructions.parquet`** — persistent semantic / contrastive instructions. Columns match the Instruction Schema plus an `embedding` column of float32 vectors. Loaded into memory at the start of each Loop A run; semantic retrieval is brute-force cosine similarity. At the end of each Loop B run the file is rewritten with updated efficacy scores and newly-minted instructions appended. Round-tripped via the `instructions_db` wandb artifact.
+* **`data/code_stats.parquet`** — per-code threshold-warning rows (one row per code that has ever crossed the FPR or FNR threshold). Frozen-rate semantics: codes already present are not modified by later Loop B passes. Round-tripped via the `code_stats` wandb artifact.
+* **`data/cooccurrence.parquet`** — long-format `(code_a, code_b, lift, joint_count, count_a, count_b)` table over training-set 3-digit ground-truth co-occurrence. A frozen dataset property; built once per train split via `scripts/build_cooccurrence.py`. Currently *not* round-tripped via wandb — anyone with the train data can recompute, and changing the train split requires rebuilding anyway.
+
+Re-evaluation candidates for the instruction store (open question): SQLite for cheap row-level updates, or DuckDB on top of the same Parquet for SQL access without changing the storage substrate.
 
 ### Retrieval Logic (concrete form)
 
+For each persistent semantic / contrastive instruction `i`:
+
 ```
-fetch instruction IF (semantic_similarity >= X) OR (fpr >= Y) OR (fnr >= Z)
+fire i IF cosine(note_embedding, i.embedding) >= sim_threshold
 ```
-- Filters by predicted codes matching the instruction's `target_code`
-- Prioritizes by `efficacy_score` descending
-- Respects `max_tokens_budget`
+
+For each 3-digit code `c` in the previous prediction:
+
+```
+synthesise fp_warning(c) IF code_stats[c].fpr >= fpr_threshold
+```
+
+For each 3-digit code `c` in the cooccurring set (top-K by lift over the previous prediction, threshold `cooccurrence_threshold`, with the previous prediction itself excluded):
+
+```
+synthesise fn_warning(c) IF code_stats[c].fnr >= fnr_threshold
+```
+
+Then:
+- Deduplicate by `instruction_id` (synthesised IDs are deterministic so dedup is stable across iterations).
+- Prioritise by `efficacy_score` descending (synthesised threshold warnings tie at `0.0`).
+- Respect `max_tokens_budget`.
 
 ### Halting Conditions (concrete form)
 
