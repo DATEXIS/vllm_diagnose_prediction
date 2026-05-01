@@ -24,7 +24,7 @@ data:
   target_col: "ICD_CODES"
   admission_col: "admission_note"
   discharge_col: "discharge_note"     # used by Meta-Verifier only
-  sample_size: 50
+  sample_size: 1000
 
 # Model configuration
 model:
@@ -46,13 +46,13 @@ k8s:
 # MERLIN 2 configuration -- defaults locked per MERLIN2_SPEC.md §6.
 merlin2:
   enabled: true
-  sim_threshold: 0.8
+  sim_threshold: 0.95
   fpr_threshold: 0.5
   fnr_threshold: 0.5
-  min_support: 3
+  min_support: 2
   convergence_threshold: 0.9
   max_iterations: 5
-  max_tokens_budget: 2500
+  max_tokens_budget: 1500
   learning_rate: 1.2
   instructions_path: "data/instructions.parquet"
   # Wandb artifact roundtrip for the instruction store.
@@ -66,7 +66,7 @@ merlin2:
   # `cooccurrence_threshold` is a *lift* threshold (P(a,b)/(P(a)P(b))).
   cooccurrence_path: "data/cooccurrence.parquet"
   cooccurrence_threshold: 3.0
-  cooccurrence_top_k: 20
+  cooccurrence_top_k: 10
   cooccurrence_min_joint_count: 3
   # Per-code threshold-warning stats. Loop B writes new entries; the
   # Retriever synthesises FP/FN warning text at runtime from these.

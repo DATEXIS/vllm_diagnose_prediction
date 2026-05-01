@@ -41,6 +41,7 @@ class CaseState:
     predictions: List[ICDsModel] = field(default_factory=list)
     raw_responses: List[str] = field(default_factory=list)
     prompts: List[str] = field(default_factory=list)
+    think_blocks: List[str] = field(default_factory=list)
     retrieval_events: List[List[RetrievalEvent]] = field(default_factory=list)
     instruction_ids_used: List[List[int]] = field(default_factory=list)
     iteration_f1: List[float] = field(default_factory=list)
@@ -302,6 +303,7 @@ class MERLINPipeline:
             s.predictions.append(gen_res.prediction)
             s.raw_responses.append(gen_res.raw_response)
             s.prompts.append(gen_res.prompt)
+            s.think_blocks.append(gen_res.think_block)
             s.retrieval_events.append(retrieval.events)
             new_ids = [ev.instruction_id for ev in retrieval.events]
             s.instruction_ids_used.append(new_ids)

@@ -97,13 +97,21 @@ def _row_to_instruction(row: pd.Series) -> Instruction:
 
     fpr = row.get("fpr_at_creation")
     fnr = row.get("fnr_at_creation")
+    
+    def _safe_list(val):
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return []
+        if isinstance(val, (np.ndarray, list, tuple, pd.Series)):
+            return list(val)
+        return [val]
+
     return Instruction(
         instruction_id=int(row["instruction_id"]),
         type=row["type"],
         instruction_text=row["instruction_text"],
         description=row.get("description", "") or "",
-        target_codes=list(row.get("target_codes", []) or []),
-        source_hadm_ids=list(row.get("source_hadm_ids", []) or []),
+        target_codes=_safe_list(row.get("target_codes")),
+        source_hadm_ids=_safe_list(row.get("source_hadm_ids")),
         fpr_at_creation=None if fpr is None or (isinstance(fpr, float) and np.isnan(fpr)) else float(fpr),
         fnr_at_creation=None if fnr is None or (isinstance(fnr, float) and np.isnan(fnr)) else float(fnr),
         efficacy_score=float(row.get("efficacy_score", 0.0) or 0.0),

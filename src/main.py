@@ -118,6 +118,14 @@ async def main_async(config: dict) -> None:
     df["raw_response"] = [r.final_raw_response for r in results]
     df["iterations"] = [r.iterations for r in results]
     df["halt_reason"] = [r.halt_reason for r in results]
+    # The non-think-block parts of the prompt (system + admission note +
+    # JSON example) are constant across iterations, so we only log the
+    # final iteration's think block — that's where the per-iteration
+    # variation actually lives.
+    df["think_block_final"] = [
+        r.history.think_blocks[-1] if r.history.think_blocks else "" for r in results
+    ]
+    df["instructions"] = [r.history.think_blocks for r in results]
 
     # ------------------------------------------------------------------ Eval
     df_results = None

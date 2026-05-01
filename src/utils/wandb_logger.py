@@ -94,7 +94,8 @@ def log_per_iteration_metrics(per_iter: List[Dict[str, float]]) -> None:
 
 def log_sample_table(df: pd.DataFrame, n_samples: int = 30) -> None:
     """Log a small sample table for debugging. Strings only; no nested objects."""
-    sample = df.head(n_samples).map(str)
+    log_df = df.drop(columns=['hadm_id', 'subject_id', 'discharge_note'], errors="ignore")
+    sample = log_df.head(n_samples).map(str)
     wandb.log({"sample_predictions": wandb.Table(dataframe=sample)})
 
 

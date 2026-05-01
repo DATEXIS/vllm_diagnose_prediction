@@ -36,6 +36,7 @@ class GenerateResult:
     prediction: ICDsModel
     raw_response: str
     prompt: str
+    think_block: str = ""
     parse_failed: bool = False  # True if the model returned no usable JSON
 
 
@@ -63,10 +64,11 @@ class Generator:
         case, and set `parse_failed=True`. The Pipeline halts the case
         with `HaltReason.PARSE_FAILURE` on its next halt-check.
         """
-        prompts = [self._build_prompt(req) for req in requests]
+        prompts_and_thinks = [self._build_prompt(req) for req in requests]
+        prompts = [p for p, _ in prompts_and_thinks]
         responses = await self._call_vllm_batch(prompts)
         results: List[GenerateResult] = []
-        for prompt, raw in zip(prompts, responses):
+        for (prompt, think_block), raw in zip(prompts_and_thinks, responses):
             try:
                 prediction = parse_prediction(raw)
                 parse_failed = False
@@ -81,13 +83,14 @@ class Generator:
                     prediction=prediction,
                     raw_response=raw,
                     prompt=prompt,
+                    think_block=think_block,
                     parse_failed=parse_failed,
                 )
             )
         return results
 
     # --------------------------------------------------------- prompt build
-    def _build_prompt(self, req: GenerateRequest) -> str:
+    def _build_prompt(self, req: GenerateRequest) -> Tuple[str, str]:
         system = load_prompt("generator_system").format(json_example=GENERATOR_JSON_EXAMPLE)
         user = load_prompt("generator_user").format(admission_note=req.admission_note)
         think_block = self._build_think_block(req.instructions, req.previous_predicted_codes)
@@ -95,8 +98,8 @@ class Generator:
         # The think block is presented as "assistant scratch reasoning"
         # appended after the user turn so the Generator continues from it.
         if think_block:
-            return f"{system}\n\n{user}\n{think_block}\n"
-        return f"{system}\n\n{user}\n"
+            return f"{system}\n\n{user}\n{think_block}\n", think_block
+        return f"{system}\n\n{user}\n", ""
 
     def _build_think_block(
         self,
