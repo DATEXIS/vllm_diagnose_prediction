@@ -28,18 +28,16 @@ def load_prompt(name: str) -> str:
 # Canonical JSON example we ask the Generator to follow. Defined here
 # (not in the prompt file) so it stays in sync with the pydantic schema.
 GENERATOR_JSON_EXAMPLE = json.dumps(
-    {
-        "diagnoses": [
-            {
-                "icd_code": "I10",
-                "reason": "Patient has persistent hypertension noted in the admission note.",
-            },
-            {
-                "icd_code": "E11.9",
-                "reason": "Elevated blood glucose levels indicating type 2 diabetes mellitus.",
-            },
-        ]
-    },
+    [
+        {
+            "icd_code": "I10",
+            "reason": "Patient has persistent hypertension noted in the admission note.",
+        },
+        {
+            "icd_code": "E11.9",
+            "reason": "Elevated blood glucose levels indicating type 2 diabetes mellitus.",
+        },
+    ],
     indent=2,
 )
 

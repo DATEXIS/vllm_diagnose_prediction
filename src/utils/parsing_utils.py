@@ -1,42 +1,62 @@
 """Minimal JSON parsing for LLM responses.
 
-Philosophy (per AGENTS.md): no repair, no regex fallbacks, no silent
-failures. Find the last valid JSON object in the response and validate
-it against the prediction schema. If the model's output cannot be
-parsed, raise — the pipeline is meant to crash so the issue surfaces.
+Three output formats are accepted, tried in order:
+
+  1. JSON array (preferred / new format)
+       [{icd_code, reason}, ...]
+     The model is instructed to emit this. Most natural for a list task;
+     removes one nesting level that caused frequent 'diagnoses: Field required'
+     failures.
+
+  2. JSON object with a `diagnoses` key (legacy format)
+       {"diagnoses": [{icd_code, reason}, ...]}
+     Kept for backward compatibility and for cases where the model reverts.
+
+  3. Single ICDPrediction dict (common mis-generation)
+       {"icd_code": "N20", "reason": "..."}
+     Wraps the lone item into a single-diagnosis ICDsModel so the case is
+     not silently dropped.
+
+<think>…</think> blocks emitted by reasoning models are stripped before
+any extraction is attempted.
 """
+
+from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import List
 
 from pydantic import ValidationError
 
-from src.prompter import ICDsModel
+from src.prompter import ICDPrediction, ICDsModel
 
 logger = logging.getLogger(__name__)
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 class JSONExtractionError(ValueError):
     """Raised when no valid prediction JSON can be extracted from a response."""
 
 
+# --------------------------------------------------------------- stripping
+def _strip_think_blocks(text: str) -> str:
+    """Remove <think>…</think> sections emitted by reasoning models."""
+    return _THINK_BLOCK_RE.sub("", text).strip()
+
+
+# --------------------------------------------------------------- extractors
 def extract_last_json_object(text: str) -> str:
-    """Return the substring of `text` containing the last balanced top-level
-    JSON object (i.e. the last `{...}` block whose braces balance).
+    """Return the substring containing the last balanced `{...}` block.
 
-    Scans backwards from the end of the string. Strings (with escape
-    handling) are skipped so that braces inside string literals are not
-    counted as structural.
-
-    Raises JSONExtractionError if no balanced `{...}` block exists.
+    Raises JSONExtractionError if none is found.
     """
     n = len(text)
-    # Walk from the end looking for closing braces; for each, find the
-    # matching opening brace and check that the slice parses as JSON.
     i = n - 1
     while i >= 0:
-        if text[i] == '}':
+        if text[i] == "}":
             depth = 0
             j = i
             in_string = False
@@ -46,51 +66,153 @@ def extract_last_json_object(text: str) -> str:
                 if in_string:
                     if escape:
                         escape = False
-                    elif ch == '\\':
+                    elif ch == "\\":
                         escape = True
                     elif ch == '"':
                         in_string = False
                 else:
                     if ch == '"':
                         in_string = True
-                    elif ch == '}':
+                    elif ch == "}":
                         depth += 1
-                    elif ch == '{':
+                    elif ch == "{":
                         depth -= 1
                         if depth == 0:
-                            candidate = text[j:i + 1]
+                            candidate = text[j : i + 1]
                             try:
                                 json.loads(candidate)
                                 return candidate
                             except json.JSONDecodeError:
-                                # Not balanced/valid; keep scanning further left
-                                # for an earlier closing brace.
                                 break
                 j -= 1
             i = j - 1
         else:
             i -= 1
 
-    raise JSONExtractionError(
-        f"No balanced JSON object found in response. Preview: {text[:300]!r}"
-    )
+    raise JSONExtractionError("No balanced JSON object found in response.")
 
 
+def extract_last_json_array(text: str) -> str:
+    """Return the substring containing the last balanced `[...]` block.
+
+    Raises JSONExtractionError if none is found.
+    """
+    n = len(text)
+    i = n - 1
+    while i >= 0:
+        if text[i] == "]":
+            depth = 0
+            j = i
+            in_string = False
+            escape = False
+            while j >= 0:
+                ch = text[j]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif ch == "\\":
+                        escape = True
+                    elif ch == '"':
+                        in_string = False
+                else:
+                    if ch == '"':
+                        in_string = True
+                    elif ch == "]":
+                        depth += 1
+                    elif ch == "[":
+                        depth -= 1
+                        if depth == 0:
+                            candidate = text[j : i + 1]
+                            try:
+                                json.loads(candidate)
+                                return candidate
+                            except json.JSONDecodeError:
+                                break
+                j -= 1
+            i = j - 1
+        else:
+            i -= 1
+
+    raise JSONExtractionError("No balanced JSON array found in response.")
+
+
+# --------------------------------------------------------------- main parser
 def parse_prediction(response: str) -> ICDsModel:
     """Parse an LLM response into an ICDsModel.
 
-    Extracts the last balanced JSON object and validates it. Raises on
-    failure (no repair, no regex extraction).
+    Tries formats in order:
+      1. JSON array   → each element validated as ICDPrediction
+      2. JSON object  → validated as ICDsModel (diagnoses key required)
+      3. Single dict  → validated as ICDPrediction, wrapped as 1-item ICDsModel
+
+    Think blocks are stripped before any extraction.
+    Raises JSONExtractionError if all three attempts fail.
     """
     if not response:
         raise JSONExtractionError("Empty response.")
-    candidate = extract_last_json_object(response)
+
+    text = _strip_think_blocks(response) or response
+    errors: List[str] = []
+
+    # ---- 1. array -------------------------------------------------------
     try:
-        return ICDsModel.model_validate_json(candidate)
-    except ValidationError as e:
-        raise JSONExtractionError(
-            f"Extracted JSON did not match ICDsModel schema: {e}\nCandidate: {candidate[:500]}"
-        ) from e
+        arr_str = extract_last_json_array(text)
+        raw_list = json.loads(arr_str)
+        if isinstance(raw_list, list):
+            try:
+                diagnoses = [
+                    ICDPrediction.model_validate(item)
+                    for item in raw_list
+                    if isinstance(item, dict)
+                ]
+                if diagnoses:
+                    return ICDsModel(diagnoses=diagnoses)
+                errors.append("Array was empty or contained no valid dicts")
+            except ValidationError as e:
+                errors.append(f"Array items invalid: {e}")
+        else:
+            errors.append("Parsed array token was not a list")
+    except (JSONExtractionError, json.JSONDecodeError) as e:
+        errors.append(f"No array: {e}")
+
+    # ---- 2. {diagnoses: [...]} object -----------------------------------
+    try:
+        obj_str = extract_last_json_object(text)
+        raw_obj = json.loads(obj_str)
+
+        if isinstance(raw_obj, dict) and "diagnoses" in raw_obj:
+            try:
+                return ICDsModel.model_validate(raw_obj)
+            except ValidationError as e:
+                errors.append(f"Object diagnoses invalid: {e}")
+
+        # ---- 3. single ICDPrediction dict --------------------------------
+        elif isinstance(raw_obj, dict) and "icd_code" in raw_obj:
+            try:
+                single = ICDPrediction.model_validate(raw_obj)
+                logger.debug("Wrapped single ICDPrediction dict into ICDsModel")
+                return ICDsModel(diagnoses=[single])
+            except ValidationError as e:
+                errors.append(f"Single dict invalid: {e}")
+        else:
+            errors.append(f"Object has neither 'diagnoses' nor 'icd_code' key")
+
+    except (JSONExtractionError, json.JSONDecodeError) as e:
+        errors.append(f"No object: {e}")
+
+    post_think = _strip_think_blocks(response)
+    if post_think:
+        context = f"Post-think content ({len(post_think)} chars): {post_think[:400]!r}"
+    else:
+        # Think block was never closed — show the tail so we can see where
+        # the model stopped (e.g. mid-sentence if max_tokens was hit)
+        context = (
+            f"Think block incomplete (response {len(response)} chars, likely truncated). "
+            f"Tail: {response[-300:]!r}"
+        )
+    raise JSONExtractionError(
+        f"Could not parse prediction. Attempts: {'; '.join(errors)}. {context}"
+    )
 
 
 def parse_prediction_codes(response: str) -> List[str]:

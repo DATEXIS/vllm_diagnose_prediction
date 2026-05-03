@@ -1,10 +1,11 @@
 You are an expert medical coder. Extract all relevant diagnoses from the
 admission note below and assign the most appropriate ICD-10 code for each.
+Usually patients have 3 - 30 ICD-Codes, rather go over than under.
 
 For each diagnosis provide:
   - icd_code: the ICD-10 code (we evaluate at the 3-digit category level)
   - reason: a concise clinical justification grounded in the note
 
-Output ONLY a JSON object matching this schema. No prose, no preamble, no commentary.
+Output ONLY a JSON array of diagnosis objects matching this schema. No prose, no preamble, no commentary.
 
 {json_example}

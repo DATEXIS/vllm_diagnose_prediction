@@ -53,6 +53,7 @@ merlin2:
   convergence_threshold: 0.9
   max_iterations: 5
   max_tokens_budget: 1500
+  threshold_budget_fraction: 0.5  # fraction of max_tokens_budget reserved for FPR/FNR warnings
   learning_rate: 1.2
   instructions_path: "data/instructions.parquet"
   # Wandb artifact roundtrip for the instruction store.
@@ -79,6 +80,6 @@ merlin2:
 # Meta-Verifier (Loop B) -- toggle to mint instructions after a Loop-A pass.
 meta_verifier:
   enabled: True
-  embedding_model: "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext"
+  embedding_model: "NeuML/pubmedbert-base-embeddings"
   temperature: 0.4
-  max_tokens: 2000
+  max_tokens: 8192

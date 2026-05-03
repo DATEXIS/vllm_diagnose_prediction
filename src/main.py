@@ -140,10 +140,16 @@ async def main_async(config: dict) -> None:
             if per_iter:
                 wandb_logger.log_per_iteration_metrics(per_iter)
 
-        # Retrieval-event log
+        # ICD count metrics
+        wandb_logger.log_icd_counts(
+            y_true=df["true_codes"].tolist(),
+            y_pred=df_results["parsed_predictions"].tolist(),
+        )
+
+        # Retrieval-event % per path type (line graph)
         events_df = _flatten_retrieval_events(results)
         if not events_df.empty:
-            wandb_logger.log_retrieval_events(events_df)
+            wandb_logger.log_retrieval_type_pcts(events_df)
 
         out_path = (
             config["data"]
@@ -219,24 +225,64 @@ def _per_iteration_metrics(
     results: List[PipelineCaseResult],
     ground_truth: List[List[str]],
 ) -> List[dict]:
-    """Compute micro/macro F1 per iteration t across the batch."""
+    """Compute all eval metrics per iteration t for two settings.
+
+    Returns a list of dicts, one per iteration t, each with two keys:
+      - "all":       metrics over every sample that has a prediction at t
+      - "last_iter": metrics over only the samples whose final iteration is t
+                     (i.e. they halted/finished after this wave)
+
+    At t=0 both settings are identical — every sample is in its first (and
+    potentially last) iteration, so the "last_iter" subset equals "all".
+
+    Metric keys per setting: f1_micro, f1_macro, precision_micro,
+    recall_micro, precision_macro, recall_macro.
+    """
     from src.data.evaluate import calculate_metrics
+
+    def _metrics_dict(m: dict) -> dict:
+        return {
+            "f1_micro": m["micro"]["f1"],
+            "f1_macro": m["macro"]["f1"],
+            "precision_micro": m["micro"]["precision"],
+            "recall_micro": m["micro"]["recall"],
+            "precision_macro": m["macro"]["precision"],
+            "recall_macro": m["macro"]["recall"],
+        }
 
     max_iters = max(r.iterations for r in results) if results else 0
     out = []
     for t in range(max_iters):
-        y_pred, y_true = [], []
+        entry: dict = {}
+
+        # Setting 1: all samples that have a prediction at iteration t
+        y_pred_all, y_true_all = [], []
         for r, truth in zip(results, ground_truth):
             if t < len(r.history.predictions):
-                y_pred.append(
+                y_pred_all.append(
                     [normalize_icd(d.icd_code) for d in r.history.predictions[t].diagnoses
                      if normalize_icd(d.icd_code)]
                 )
-                y_true.append([normalize_icd(c) for c in truth if normalize_icd(c)])
-        if not y_pred:
-            continue
-        m = calculate_metrics(y_true, y_pred)
-        out.append({"f1_micro": m["micro"]["f1"], "f1_macro": m["macro"]["f1"]})
+                y_true_all.append([normalize_icd(c) for c in truth if normalize_icd(c)])
+        if y_pred_all:
+            entry["all"] = _metrics_dict(calculate_metrics(y_true_all, y_pred_all))
+
+        # Setting 2: samples whose final iteration is t
+        # r.iterations == len(r.history.predictions), so the last index is
+        # r.iterations - 1; a sample "finishes at t" when that equals t.
+        y_pred_last, y_true_last = [], []
+        for r, truth in zip(results, ground_truth):
+            if len(r.history.predictions) - 1 == t:
+                y_pred_last.append(
+                    [normalize_icd(d.icd_code) for d in r.history.predictions[t].diagnoses
+                     if normalize_icd(d.icd_code)]
+                )
+                y_true_last.append([normalize_icd(c) for c in truth if normalize_icd(c)])
+        if y_pred_last:
+            entry["last_iter"] = _metrics_dict(calculate_metrics(y_true_last, y_pred_last))
+
+        if entry:
+            out.append(entry)
     return out
 
 

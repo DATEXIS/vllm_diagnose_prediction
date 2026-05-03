@@ -19,7 +19,6 @@ class ICDPrediction(BaseModel):
 class ICDsModel(BaseModel):
     diagnoses: List[ICDPrediction] = Field(
         description="A list of predicted ICD codes with clinical reasoning.",
-        max_length=15,
     )
 
 

@@ -109,6 +109,7 @@ class Retriever:
         fpr_threshold: float = 0.5,
         fnr_threshold: float = 0.5,
         max_tokens_budget: int = 2500,
+        threshold_budget_fraction: float = 0.5,
         cooccurrence_index: Optional[CooccurrenceIndex] = None,
         code_stats: Optional[CodeStatsIndex] = None,
     ):
@@ -116,6 +117,7 @@ class Retriever:
         self.fpr_threshold = fpr_threshold
         self.fnr_threshold = fnr_threshold
         self.max_tokens_budget = max_tokens_budget
+        self.threshold_budget_fraction = threshold_budget_fraction
         # Cooccurrence index: {predicted_code -> [(other_code, lift), ...]}.
         # Threshold + top-K already applied at load time. An empty dict
         # disables the FN-via-cooccurrence path entirely.
@@ -288,13 +290,30 @@ class Retriever:
                     efficacy_score=0.0,
                 )
 
-        # ---- prioritize and apply token budget -------------------------
+        # ---- prioritize and apply split token budget -------------------
+        # Problem: threshold instructions always have efficacy_score=0.0
+        # (no tracking by design), while semantic instructions accumulate
+        # positive efficacy over training runs. A purely efficacy-ordered
+        # queue would fill the budget with semantics and never admit
+        # FPR/FNR warnings.
+        #
+        # Solution: split the budget.
+        #   - Threshold slot: threshold_budget_fraction * max_tokens_budget
+        #     FPR/FNR instructions sorted by trigger_value desc (most-
+        #     violated codes first). Any unused threshold tokens spill
+        #     into the semantic slot.
+        #   - Semantic slot: the remainder, sorted by efficacy desc.
+        #
         # `instructions` property includes synthesised threshold warnings
         # so they are looked up alongside persisted ones.
         id_to_instr = {i.instruction_id: i for i in self.instructions}
-        # Sort by efficacy descending; ties broken by instruction_id for determinism.
-        ordered_events = sorted(
-            triggered.values(),
+
+        threshold_events = sorted(
+            [ev for ev in triggered.values() if ev.path in (THRESHOLD_FPR, THRESHOLD_FNR)],
+            key=lambda ev: (-ev.trigger_value, ev.instruction_id),
+        )
+        semantic_events = sorted(
+            [ev for ev in triggered.values() if ev.path == SEMANTIC],
             key=lambda ev: (-ev.efficacy_score, ev.instruction_id),
         )
 
@@ -302,7 +321,23 @@ class Retriever:
         selected_events: List[RetrievalEvent] = []
         total_tokens = 0
         skipped = 0
-        for ev in ordered_events:
+
+        # Fill threshold slot first
+        threshold_cap = int(self.max_tokens_budget * self.threshold_budget_fraction)
+        threshold_tokens = 0
+        for ev in threshold_events:
+            instr = id_to_instr[ev.instruction_id]
+            est = self._estimate_tokens(instr)
+            if threshold_tokens + est > threshold_cap:
+                skipped += 1
+                continue
+            selected_instructions.append(instr)
+            selected_events.append(ev)
+            threshold_tokens += est
+            total_tokens += est
+
+        # Fill remaining budget with semantic instructions
+        for ev in semantic_events:
             instr = id_to_instr[ev.instruction_id]
             est = self._estimate_tokens(instr)
             if total_tokens + est > self.max_tokens_budget:
@@ -311,6 +346,14 @@ class Retriever:
             selected_instructions.append(instr)
             selected_events.append(ev)
             total_tokens += est
+
+        if skipped:
+            logger.debug(
+                "Budget cap hit: %d instruction(s) skipped "
+                "(threshold_used=%d/%d, total_used=%d/%d)",
+                skipped, threshold_tokens, threshold_cap,
+                total_tokens, self.max_tokens_budget,
+            )
 
         return RetrievalResult(
             instructions=selected_instructions,

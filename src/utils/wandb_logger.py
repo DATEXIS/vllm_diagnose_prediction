@@ -86,10 +86,19 @@ def log_metrics(metrics: Dict[str, Any]) -> None:
     )
 
 
-def log_per_iteration_metrics(per_iter: List[Dict[str, float]]) -> None:
-    """`per_iter` is a list of {"f1_micro":.., "f1_macro":..} dicts, one per t."""
-    for t, m in enumerate(per_iter):
-        wandb.log({f"iter/{k}": v for k, v in m.items()} | {"iteration": t})
+def log_per_iteration_metrics(per_iter: List[Dict[str, Any]]) -> None:
+    """`per_iter` is a list of dicts with 'all' and 'last_iter' sub-dicts, one per t.
+
+    Keys logged:
+        iter/all/f1_micro, iter/all/f1_macro, iter/all/precision_micro, ...
+        iter/last_iter/f1_micro, ...
+    """
+    for t, entry in enumerate(per_iter):
+        log_dict: Dict[str, Any] = {"iteration": t}
+        for setting, m in entry.items():
+            for k, v in m.items():
+                log_dict[f"iter/{setting}/{k}"] = v
+        wandb.log(log_dict)
 
 
 def log_sample_table(df: pd.DataFrame, n_samples: int = 30) -> None:
@@ -99,9 +108,31 @@ def log_sample_table(df: pd.DataFrame, n_samples: int = 30) -> None:
     wandb.log({"sample_predictions": wandb.Table(dataframe=sample)})
 
 
-def log_retrieval_events(events_df: pd.DataFrame, n_samples: int = 200) -> None:
-    """Log a flat retrieval-event table: hadm_id, iter, instr_id, path, trigger_value, efficacy."""
-    wandb.log({"retrieval_events": wandb.Table(dataframe=events_df.head(n_samples).map(str))})
+def log_retrieval_type_pcts(events_df: pd.DataFrame) -> None:
+    """Log % of each retrieval path type per iteration as wandb line-graph metrics.
+
+    Paths: semantic, threshold_fpr, threshold_fnr.
+    One wandb.log call per iteration so they plot cleanly on the same axes.
+    """
+    if events_df.empty:
+        return
+    paths = ["semantic", "threshold_fpr", "threshold_fnr"]
+    for iteration, grp in events_df.groupby("iteration"):
+        total = len(grp)
+        counts = grp["path"].value_counts()
+        wandb.log(
+            {f"retrieval_pct/{p}": counts.get(p, 0) / total * 100 for p in paths}
+            | {"iteration": int(iteration)}
+        )
+
+
+def log_icd_counts(
+    y_true: List[List[str]], y_pred: List[List[str]]
+) -> None:
+    """Log avg true ICD count and avg predicted ICD count for the run."""
+    avg_true = sum(len(t) for t in y_true) / len(y_true) if y_true else 0.0
+    avg_pred = sum(len(p) for p in y_pred) / len(y_pred) if y_pred else 0.0
+    wandb.log({"icd_count/avg_true": avg_true, "icd_count/avg_pred": avg_pred})
 
 
 # --------------------------------------------------- generic parquet artifact

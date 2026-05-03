@@ -137,6 +137,7 @@ class MERLINPipeline:
             fpr_threshold=merlin2_cfg.get("fpr_threshold", 0.5),
             fnr_threshold=merlin2_cfg.get("fnr_threshold", 0.5),
             max_tokens_budget=merlin2_cfg.get("max_tokens_budget", 2500),
+            threshold_budget_fraction=merlin2_cfg.get("threshold_budget_fraction", 0.5),
             cooccurrence_index=cooccurrence_index,
             code_stats=code_stats,
         )
@@ -295,6 +296,12 @@ class MERLINPipeline:
                 )
             )
 
+        if logger.isEnabledFor(logging.DEBUG):
+            for s, retrieval, carry, req in zip(
+                states, per_case_retrieval, carryover_per_case, requests
+            ):
+                self._log_wave_inputs(s.hadm_id, iteration, req.previous_predicted_codes, carry, retrieval)
+
         # 4) one batched LLM call
         results: List[GenerateResult] = await self.generator.generate_batch(requests)
 
@@ -339,6 +346,51 @@ class MERLINPipeline:
                         ):
                             continue
                         instr.efficacy_score = float(instr.efficacy_score + update)
+
+    # ----------------------------------------------------------- wave logging
+    @staticmethod
+    def _log_wave_inputs(
+        hadm_id: str,
+        iteration: int,
+        prev_codes: List[str],
+        carry: List[Instruction],
+        retrieval: "RetrievalResult",
+    ) -> None:
+        """Log one DEBUG line per case showing iteration context and instructions."""
+        from src.merlin2.retriever import SEMANTIC, THRESHOLD_FPR, THRESHOLD_FNR
+
+        prev_str = "[" + ", ".join(prev_codes) + "]" if prev_codes else "[]"
+
+        instr_parts: List[str] = []
+        ev_by_id = {ev.instruction_id: ev for ev in retrieval.events}
+        for instr in retrieval.instructions:
+            ev = ev_by_id.get(instr.instruction_id)
+            if ev is None:
+                path_tag = "?"
+            elif ev.path == SEMANTIC:
+                path_tag = f"sem({ev.trigger_value:.2f})"
+            elif ev.path == THRESHOLD_FPR:
+                path_tag = f"fpr({ev.trigger_value:.2f})"
+            elif ev.path == THRESHOLD_FNR:
+                path_tag = f"fnr({ev.trigger_value:.2f})"
+            else:
+                path_tag = ev.path
+            snippet = (instr.instruction_text or "")[:60].replace("\n", " ")
+            instr_parts.append(f"#{instr.instruction_id} {path_tag} \"{snippet}\"")
+
+        new_str = (
+            f"new[{len(retrieval.instructions)}]: " + " | ".join(instr_parts)
+            if retrieval.instructions else "new[0]"
+        )
+        skipped_str = (
+            f" (skipped {retrieval.skipped_for_budget} over budget)"
+            if retrieval.skipped_for_budget else ""
+        )
+
+        logger.debug(
+            "[WAVE t=%d] %s | prev=%s | carry=%d | %s%s",
+            iteration, hadm_id, prev_str, len(carry), new_str, skipped_str,
+        )
 
     # ----------------------------------------------------------- finalize
     def _finalize(self, s: CaseState) -> PipelineCaseResult:

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -51,7 +52,7 @@ class MetaVerifierConfig:
     fnr_threshold: float = 0.5
     min_support: int = 3
     temperature: float = 0.4
-    max_tokens: int = 2000
+    max_tokens: int = 8192
 
 
 @dataclass
@@ -67,21 +68,40 @@ class AuditResult:
 
 
 # --------------------------------------------------------------- helpers
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+
+def _strip_think_blocks(text: str) -> str:
+    """Remove <think>…</think> sections emitted by reasoning models."""
+    return _THINK_BLOCK_RE.sub("", text).strip()
+
+
 def _extract_json_list(text: str) -> List[dict]:
-    """Find the last balanced `[...]` and json.loads it. Fail-fast."""
+    """Find the last balanced `[...]` and json.loads it.
+
+    Reasoning models (e.g. Qwen3) prepend a <think>…</think> block before
+    their JSON output.  We strip those first so that:
+      - A complete think block followed by valid JSON → JSON is found.
+      - A truncated think block (max_tokens hit mid-think, no JSON) →
+        stripped text is empty → clear ValueError with the original preview.
+    """
     if not text:
         raise ValueError("Empty Meta-Verifier response.")
+
+    # Search in think-stripped text; fall back to raw if stripping left nothing
+    search_text = _strip_think_blocks(text) or text
+
     # Find last `]`
-    end = text.rfind("]")
+    end = search_text.rfind("]")
     if end < 0:
         raise ValueError(f"No ']' in Meta-Verifier response. Preview: {text[:300]!r}")
-    # Walk backwards to find matching `[`
+    # Walk backwards to find the matching `[`
     depth = 0
     in_str = False
     escape = False
     start = -1
     for i in range(end, -1, -1):
-        ch = text[i]
+        ch = search_text[i]
         if in_str:
             if escape:
                 escape = False
@@ -101,16 +121,30 @@ def _extract_json_list(text: str) -> List[dict]:
                     break
     if start < 0:
         raise ValueError(f"No balanced '[...]' in Meta-Verifier response. Preview: {text[:300]!r}")
-    parsed = json.loads(text[start : end + 1])
+    parsed = json.loads(search_text[start : end + 1])
     if not isinstance(parsed, list):
         raise ValueError(f"Expected list, got {type(parsed).__name__}")
     return parsed
 
 
 def _validate_rich_items(items: List[dict]) -> List[RichErrorInstruction]:
+    """Validate each item individually; skip non-dicts and invalid items.
+
+    The LLM occasionally emits bare ICD strings (e.g. "S72") alongside
+    proper dicts.  Skipping bad entries per-item lets us salvage the rest
+    of the case rather than discarding it entirely.
+    """
     out: List[RichErrorInstruction] = []
     for raw in items:
-        out.append(RichErrorInstruction.model_validate(raw))
+        if not isinstance(raw, dict):
+            logger.debug(
+                "Meta-Verifier: skipping non-dict item in JSON list: %r", raw
+            )
+            continue
+        try:
+            out.append(RichErrorInstruction.model_validate(raw))
+        except ValidationError as e:
+            logger.debug("Meta-Verifier: skipping invalid item %r: %s", raw, e)
     return out
 
 
