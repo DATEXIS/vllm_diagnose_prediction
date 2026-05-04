@@ -85,6 +85,60 @@ spec:
       targetPort: 8000
 """
 
+index_builder_template = """apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: diagnose-config-{{ cfg.job_name }}
+  namespace: {{ cfg.k8s.namespace }}
+data:
+  config.yaml: |
+    {{ cfg | tojson }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: index-builder-{{ cfg.job_name }}
+  namespace: {{ cfg.k8s.namespace }}
+spec:
+  template:
+    spec:
+      containers:
+        - name: index-builder
+          image: {{ cfg.docker.registry }}/{{ cfg.docker.indexer_image_name }}:{{ cfg.docker.tag }}
+          command: ["python", "src/build_index_entrypoint.py", "--config", "/app/config/config.yaml"]
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+            - name: data
+              mountPath: /app/data
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              memory: "16Gi"
+            requests:
+              nvidia.com/gpu: "1"
+              memory: "8Gi"
+          env:
+            - name: HUGGING_FACE_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: HF_TOKEN
+      volumes:
+        - name: config
+          configMap:
+            name: diagnose-config-{{ cfg.job_name }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ cfg.k8s.pvc_name }}
+      imagePullSecrets:
+        - name: {{ cfg.k8s.image_pull_secrets }}
+      restartPolicy: Never
+      nodeSelector:
+        gpu: {{ cfg.k8s.server.gpu_type }}
+  backoffLimit: 0
+"""
+
 client_template = """apiVersion: v1
 kind: ConfigMap
 metadata:

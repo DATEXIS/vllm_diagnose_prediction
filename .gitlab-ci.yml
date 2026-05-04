@@ -19,3 +19,5 @@ docker_build:
   script:
     - docker build -t registry.datexis.com/caka7833/vllm_diagnose_prediction:latest .
     - docker push registry.datexis.com/caka7833/vllm_diagnose_prediction:latest
+    - docker build -f Dockerfile.indexer -t registry.datexis.com/caka7833/vllm_diagnose_prediction_indexer:latest .
+    - docker push registry.datexis.com/caka7833/vllm_diagnose_prediction_indexer:latest

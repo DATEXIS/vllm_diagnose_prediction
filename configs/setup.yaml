@@ -5,6 +5,7 @@
 docker:
   registry: "registry.datexis.com/caka7833"
   image_name: "vllm_diagnose_prediction"
+  indexer_image_name: "vllm_diagnose_prediction_indexer"
   tag: "latest"
   platform: "linux/amd64"
   server_image: "vllm/vllm-openai:v0.12.0"
