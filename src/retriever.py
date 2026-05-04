@@ -1,7 +1,7 @@
 import asyncio
-import json
 import logging
 import pickle
+import re
 from pathlib import Path
 
 import numpy as np
@@ -150,19 +150,19 @@ _SINGLE_QUERY_PROMPT = (
 _MULTI_QUERY_PROMPT = (
     "You rewrite clinical admission notes into multiple diverse, concise queries "
     "for PubMed retrieval and ICD coding.\n\n"
-    "Generate exactly {n} queries that together cover different aspects of the note:\n"
-    "- Query 1: Primary diagnoses and chief complaints\n"
-    "- Query 2: Comorbidities, medical history, current medications\n"
-    "- Query 3: Procedures, laboratory findings, key clinical observations\n\n"
+    "Generate exactly {n} numbered queries that together cover different aspects of the note:\n"
+    "1. Primary diagnoses and chief complaints\n"
+    "2. Comorbidities, medical history, current medications\n"
+    "3. Procedures, laboratory findings, key clinical observations\n\n"
     "Rules:\n"
     "- Use only explicitly stated information (no assumptions).\n"
     "- Preserve negations and temporality (e.g., \"denies\", acute/chronic).\n"
     "- Remove non-clinical and redundant text.\n"
     "- Use standard medical terminology.\n\n"
-    "Return ONLY a JSON array of exactly {n} query strings, no explanation.\n"
-    "Example: [\"query one\", \"query two\", \"query three\"]\n\n"
+    "Output exactly {n} lines, each starting with its number and a period.\n"
+    "No explanation, no preamble.\n\n"
     "Admission note:\n{note}\n\n"
-    "JSON array:"
+    "Queries:"
 )
 
 
@@ -194,15 +194,20 @@ async def _rewrite_one(
                 resp.raise_for_status()
                 data = await resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
-                # Qwen3 (and other thinking models) wrap output in <think>...</think>
-                # before the actual answer — strip that block first.
+                # Strip Qwen3-style thinking block if present.
                 if "</think>" in content:
                     content = content.split("</think>", 1)[-1].strip()
                 if n_queries == 1:
                     return [content]
-                parsed = json.loads(content)
-                if isinstance(parsed, list) and parsed:
-                    return [str(q).strip() for q in parsed[:n_queries]]
+                # Parse numbered list: "1. query", "2. query", ...
+                # Works even when the response is partially truncated.
+                queries = []
+                for line in content.splitlines():
+                    cleaned = re.sub(r'^\d+\.\s*', '', line.strip())
+                    if cleaned:
+                        queries.append(cleaned)
+                if queries:
+                    return queries[:n_queries]
                 return [note[:500]]
         except Exception as e:
             logger.warning(f"Query generation failed, falling back to raw note: {e}")
