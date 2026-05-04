@@ -35,6 +35,8 @@ rag:
   index_persist_dir: "data/pubmed/index"
   top_k: 5
   max_abstracts: null # null = use all 250k; set a number to cap (e.g. 50000) if PVC space is tight
+  query_rewriting:
+    enabled: true # set to true to rewrite admission notes into focused medical queries before retrieval
 
 # Kubernetes cluster configuration
 k8s:

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import pickle
 from pathlib import Path
@@ -117,12 +118,72 @@ def build_index(abstracts_path: str, index_persist_dir: str, max_abstracts: int 
     return index, texts
 
 
+_QUERY_REWRITE_PROMPT = (
+    "You are a medical information retrieval expert. "
+    "Given a clinical admission note, reformulate the key medical information "
+    "as a concise PubMed search query. "
+    "Capture the primary diagnoses, chief complaints, relevant comorbidities, "
+    "and key clinical findings. "
+    "Return ONLY the search query — no explanation, no preamble.\n\n"
+    "Admission note:\n{note}\n\n"
+    "Search query:"
+)
+
+
+async def _rewrite_one(session, url: str, model: str, note: str, semaphore: asyncio.Semaphore) -> str:
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": _QUERY_REWRITE_PROMPT.format(note=note[:3000])}],
+        "temperature": 0.0,
+        "max_tokens": 200,
+        "stream": False,
+    }
+    async with semaphore:
+        try:
+            async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+                return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            logger.warning(f"Query rewriting failed, falling back to raw note: {e}")
+            return note[:500]
+
+
+async def generate_queries(admission_notes: list, config: dict) -> list:
+    """
+    Rewrites raw admission notes into concise medical search queries
+    optimised for MedCPT retrieval by calling the vLLM server.
+    Falls back to the truncated raw note on any per-request failure.
+    """
+    from aiohttp import ClientSession, ClientTimeout
+
+    job_name = config.get("job_name", "default")
+    namespace = config.get("k8s", {}).get("namespace", "default")
+    api_base = config["model"].get("api_base") or (
+        f"http://vllm-server-{job_name}.{namespace}.svc.cluster.local/v1"
+    )
+    url = f"{api_base}/chat/completions"
+    model = config["model"]["name"]
+    concurrency = config["inference"].get("concurrency", 10)
+
+    logger.info(f"Rewriting {len(admission_notes)} admission notes into retrieval queries ...")
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async with ClientSession(timeout=ClientTimeout(total=120)) as session:
+        tasks = [_rewrite_one(session, url, model, note, semaphore) for note in admission_notes]
+        queries = await asyncio.gather(*tasks)
+
+    logger.info("Query rewriting complete.")
+    return list(queries)
+
+
 def retrieve_for_dataframe(
     df: pd.DataFrame,
     index,
     texts: list,
     k: int = 5,
     query_column: str = "admission_note",
+    queries: list = None,
 ) -> pd.DataFrame:
     """
     Encodes admission notes with MedCPT-Query-Encoder (loaded once) and
@@ -132,12 +193,16 @@ def retrieve_for_dataframe(
     device = _get_device()
     tokenizer, model = _load_model(QUERY_MODEL, device)
 
-    queries = [str(val)[:500] for val in df[query_column]]
-    logger.info(f"Encoding {len(queries)} queries ...")
+    if queries is not None:
+        raw_queries = [str(q)[:500] for q in queries]
+        logger.info(f"Encoding {len(raw_queries)} rewritten queries ...")
+    else:
+        raw_queries = [str(val)[:500] for val in df[query_column]]
+        logger.info(f"Encoding {len(raw_queries)} queries ...")
 
     all_embs = []
-    for start in range(0, len(queries), QUERY_BATCH_SIZE):
-        batch = queries[start : start + QUERY_BATCH_SIZE]
+    for start in range(0, len(raw_queries), QUERY_BATCH_SIZE):
+        batch = raw_queries[start : start + QUERY_BATCH_SIZE]
         all_embs.append(_encode_batch(batch, tokenizer, model, max_length=64, device=device))
 
     del model

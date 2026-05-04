@@ -9,7 +9,7 @@ from prompter import build_prompts, get_schema
 from inference import run_inference
 from evaluate import evaluate_predictions
 import wandb_logger
-from retriever import build_index, retrieve_for_dataframe
+from retriever import build_index, retrieve_for_dataframe, generate_queries
 
 # Setup standard logging format
 def setup_logging(config: dict):
@@ -48,19 +48,28 @@ async def main_async(config: dict):
     # 2. RAG
     rag_config = config.get('rag', {})
     if rag_config.get('enabled', False):
-        logger.info("RAG aktiviert – starte Retrieval ...")
+        logger.info("RAG enabled – starting retrieval ...")
         index, texts = build_index(
             abstracts_path=rag_config['abstracts_path'],
             index_persist_dir=rag_config['index_persist_dir'],
             max_abstracts=rag_config.get('max_abstracts'),
         )
+
+        rewritten_queries = None
+        if rag_config.get('query_rewriting', {}).get('enabled', False):
+            rewritten_queries = await generate_queries(
+                admission_notes=df['admission_note'].tolist(),
+                config=config,
+            )
+
         df = retrieve_for_dataframe(
             df=df,
             index=index,
             texts=texts,
             k=rag_config.get('top_k', 5),
+            queries=rewritten_queries,
         )
-        logger.info("Retrieval abgeschlossen.")
+        logger.info("Retrieval complete.")
 
     # 3. Build Prompts
     prompts = build_prompts(df)
