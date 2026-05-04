@@ -16,7 +16,9 @@ RUN pip install --no-cache-dir --timeout 1000 \
     faiss-cpu \
     tqdm \
     pyyaml \
-    huggingface_hub
+    huggingface_hub \
+    pandas \
+    numpy
 
 COPY src/retriever.py src/retriever.py
 COPY src/build_index_entrypoint.py src/build_index_entrypoint.py
