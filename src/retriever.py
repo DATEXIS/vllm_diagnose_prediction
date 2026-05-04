@@ -183,6 +183,10 @@ async def _rewrite_one(
         "temperature": 0.0,
         "max_tokens": max_tokens,
         "stream": False,
+        # Disable Qwen3 thinking mode — query rewriting is a formatting task
+        # that doesn't benefit from chain-of-thought, and thinking tokens would
+        # consume the entire budget leaving no room for the actual output.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     async with semaphore:
         try:
