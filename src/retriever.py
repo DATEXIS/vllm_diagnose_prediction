@@ -35,6 +35,15 @@ def _load_model(model_name: str, device: str):
     return tokenizer, model
 
 
+def _load_cross_encoder(model_name: str, device: str):
+    """Load the cross-encoder with its classification head."""
+    from transformers import AutoTokenizer, AutoModelForSequenceClassification
+    logger.info(f"Loading {model_name} on {device} ...")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name).to(device).eval()
+    return tokenizer, model
+
+
 def _encode_batch(batch: list, tokenizer, model, max_length: int, device: str) -> np.ndarray:
     """Encode one batch → L2-normalised CLS embeddings (float32)."""
     import torch
@@ -267,8 +276,10 @@ def _rerank_candidates(
             )
             enc = {k: v.to(device) for k, v in enc.items()}
             out = model(**enc)
-            # MedCPT-Cross-Encoder outputs a single logit per pair
-            batch_scores = out.logits.squeeze(-1).cpu().float().tolist()
+            # logits shape: [batch, num_labels]. Use the last column:
+            # - num_labels=2 (binary): index 1 is the "relevant" class score
+            # - num_labels=1: index 0 is the single relevance score
+            batch_scores = out.logits[:, -1].cpu().float().tolist()
             if isinstance(batch_scores, float):
                 batch_scores = [batch_scores]
             scores.extend(batch_scores)
@@ -347,7 +358,7 @@ def retrieve_for_dataframe(
             f"Re-ranking with {CROSS_ENCODER_MODEL} "
             f"({[len(c) for c in candidates_per_patient]} candidates per patient) ..."
         )
-        tokenizer_ce, model_ce = _load_model(CROSS_ENCODER_MODEL, device)
+        tokenizer_ce, model_ce = _load_cross_encoder(CROSS_ENCODER_MODEL, device)
         retrieved_chunks_list = []
         for patient_idx, candidate_indices in enumerate(candidates_per_patient):
             note = str(df.iloc[patient_idx][query_column])
