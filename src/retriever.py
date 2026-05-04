@@ -190,6 +190,10 @@ async def _rewrite_one(
                 resp.raise_for_status()
                 data = await resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
+                # Qwen3 (and other thinking models) wrap output in <think>...</think>
+                # before the actual answer — strip that block first.
+                if "</think>" in content:
+                    content = content.split("</think>", 1)[-1].strip()
                 if n_queries == 1:
                     return [content]
                 parsed = json.loads(content)
