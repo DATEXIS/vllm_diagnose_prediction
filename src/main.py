@@ -62,12 +62,15 @@ async def main_async(config: dict):
                 config=config,
             )
 
+        rerank_config = rag_config.get('reranking', {})
         df = retrieve_for_dataframe(
             df=df,
             index=index,
             texts=texts,
             k=rag_config.get('top_k', 5),
             queries=rewritten_queries,
+            rerank=rerank_config.get('enabled', False),
+            fetch_k=rerank_config.get('fetch_k', 20),
         )
         logger.info("Retrieval complete.")
 

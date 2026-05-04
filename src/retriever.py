@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import pickle
 from pathlib import Path
@@ -11,8 +12,10 @@ logger = logging.getLogger(__name__)
 
 ARTICLE_MODEL = "ncbi/MedCPT-Article-Encoder"
 QUERY_MODEL = "ncbi/MedCPT-Query-Encoder"
+CROSS_ENCODER_MODEL = "ncbi/MedCPT-Cross-Encoder"
 BUILD_BATCH_SIZE = 16
 QUERY_BATCH_SIZE = 32
+RERANK_BATCH_SIZE = 16
 
 
 def _get_device() -> str:
@@ -118,24 +121,58 @@ def build_index(abstracts_path: str, index_persist_dir: str, max_abstracts: int 
     return index, texts
 
 
-_QUERY_REWRITE_PROMPT = (
-    "You are a medical information retrieval expert. "
-    "Given a clinical admission note, reformulate the key medical information "
-    "as a concise PubMed search query. "
-    "Capture the primary diagnoses, chief complaints, relevant comorbidities, "
-    "and key clinical findings. "
+# ---------------------------------------------------------------------------
+# Query generation
+# ---------------------------------------------------------------------------
+
+_SINGLE_QUERY_PROMPT = (
+    "You rewrite clinical admission notes into concise queries for retrieval and ICD coding.\n"
+    "Rules:\n"
+    "- Use only explicitly stated information (no assumptions).\n"
+    "- Keep key clinical facts: symptoms, diagnoses, history, meds, labs.\n"
+    "- Preserve negations and temporality (e.g., \"denies\", acute/chronic).\n"
+    "- Remove non-clinical and redundant text.\n"
+    "- Use standard medical terminology.\n\n"
     "Return ONLY the search query — no explanation, no preamble.\n\n"
     "Admission note:\n{note}\n\n"
     "Search query:"
 )
 
+_MULTI_QUERY_PROMPT = (
+    "You rewrite clinical admission notes into multiple diverse, concise queries "
+    "for PubMed retrieval and ICD coding.\n\n"
+    "Generate exactly {n} queries that together cover different aspects of the note:\n"
+    "- Query 1: Primary diagnoses and chief complaints\n"
+    "- Query 2: Comorbidities, medical history, current medications\n"
+    "- Query 3: Procedures, laboratory findings, key clinical observations\n\n"
+    "Rules:\n"
+    "- Use only explicitly stated information (no assumptions).\n"
+    "- Preserve negations and temporality (e.g., \"denies\", acute/chronic).\n"
+    "- Remove non-clinical and redundant text.\n"
+    "- Use standard medical terminology.\n\n"
+    "Return ONLY a JSON array of exactly {n} query strings, no explanation.\n"
+    "Example: [\"query one\", \"query two\", \"query three\"]\n\n"
+    "Admission note:\n{note}\n\n"
+    "JSON array:"
+)
 
-async def _rewrite_one(session, url: str, model: str, note: str, semaphore: asyncio.Semaphore) -> str:
+
+async def _rewrite_one(
+    session, url: str, model: str, note: str, semaphore: asyncio.Semaphore, n_queries: int
+) -> list:
+    """Returns a list of n_queries strings for one admission note."""
+    if n_queries == 1:
+        prompt = _SINGLE_QUERY_PROMPT.format(note=note[:3000])
+        max_tokens = 200
+    else:
+        prompt = _MULTI_QUERY_PROMPT.format(n=n_queries, note=note[:3000])
+        max_tokens = 100 * n_queries
+
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": _QUERY_REWRITE_PROMPT.format(note=note[:3000])}],
+        "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.0,
-        "max_tokens": 200,
+        "max_tokens": max_tokens,
         "stream": False,
     }
     async with semaphore:
@@ -143,20 +180,29 @@ async def _rewrite_one(session, url: str, model: str, note: str, semaphore: asyn
             async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
                 resp.raise_for_status()
                 data = await resp.json()
-                return data["choices"][0]["message"]["content"].strip()
+                content = data["choices"][0]["message"]["content"].strip()
+                if n_queries == 1:
+                    return [content]
+                parsed = json.loads(content)
+                if isinstance(parsed, list) and parsed:
+                    return [str(q).strip() for q in parsed[:n_queries]]
+                return [note[:500]]
         except Exception as e:
-            logger.warning(f"Query rewriting failed, falling back to raw note: {e}")
-            return note[:500]
+            logger.warning(f"Query generation failed, falling back to raw note: {e}")
+            return [note[:500]]
 
 
 async def generate_queries(admission_notes: list, config: dict) -> list:
     """
-    Rewrites raw admission notes into concise medical search queries
-    optimised for MedCPT retrieval by calling the vLLM server.
+    Generates retrieval queries for each admission note by calling the vLLM server.
+    Returns list[list[str]] — one inner list of queries per patient.
+    n_queries=1 produces a single rewritten query; n_queries>1 produces diverse
+    query variants that together cover the note from multiple angles.
     Falls back to the truncated raw note on any per-request failure.
     """
     from aiohttp import ClientSession, ClientTimeout
 
+    n_queries = config.get("rag", {}).get("query_rewriting", {}).get("n_queries", 1)
     job_name = config.get("job_name", "default")
     namespace = config.get("k8s", {}).get("namespace", "default")
     api_base = config["model"].get("api_base") or (
@@ -166,16 +212,74 @@ async def generate_queries(admission_notes: list, config: dict) -> list:
     model = config["model"]["name"]
     concurrency = config["inference"].get("concurrency", 10)
 
-    logger.info(f"Rewriting {len(admission_notes)} admission notes into retrieval queries ...")
+    logger.info(
+        f"Generating {n_queries} quer{'y' if n_queries == 1 else 'ies'} "
+        f"for {len(admission_notes)} admission notes ..."
+    )
     semaphore = asyncio.Semaphore(concurrency)
 
     async with ClientSession(timeout=ClientTimeout(total=120)) as session:
-        tasks = [_rewrite_one(session, url, model, note, semaphore) for note in admission_notes]
-        queries = await asyncio.gather(*tasks)
+        tasks = [
+            _rewrite_one(session, url, model, note, semaphore, n_queries)
+            for note in admission_notes
+        ]
+        results = await asyncio.gather(*tasks)
 
-    logger.info("Query rewriting complete.")
-    return list(queries)
+    logger.info("Query generation complete.")
+    return list(results)  # list[list[str]]
 
+
+# ---------------------------------------------------------------------------
+# Re-ranking
+# ---------------------------------------------------------------------------
+
+def _rerank_candidates(
+    query: str,
+    candidates: list,
+    tokenizer,
+    model,
+    device: str,
+    top_k: int,
+) -> list:
+    """
+    Scores (query, candidate) pairs with MedCPT-Cross-Encoder and returns
+    the top_k candidates sorted by descending relevance score.
+    """
+    import torch
+    if not candidates:
+        return candidates
+
+    # Cross-encoder has a 512-token budget shared between query and passage.
+    # Truncate query to 128 chars to leave enough room for the passage.
+    truncated_query = query[:512]
+    pairs = [[truncated_query, c] for c in candidates]
+    scores = []
+
+    with torch.no_grad():
+        for i in range(0, len(pairs), RERANK_BATCH_SIZE):
+            batch = pairs[i : i + RERANK_BATCH_SIZE]
+            enc = tokenizer(
+                batch,
+                truncation=True,
+                padding=True,
+                max_length=512,
+                return_tensors="pt",
+            )
+            enc = {k: v.to(device) for k, v in enc.items()}
+            out = model(**enc)
+            # MedCPT-Cross-Encoder outputs a single logit per pair
+            batch_scores = out.logits.squeeze(-1).cpu().float().tolist()
+            if isinstance(batch_scores, float):
+                batch_scores = [batch_scores]
+            scores.extend(batch_scores)
+
+    ranked = sorted(zip(scores, candidates), key=lambda x: x[0], reverse=True)
+    return [text for _, text in ranked[:top_k]]
+
+
+# ---------------------------------------------------------------------------
+# Main retrieval
+# ---------------------------------------------------------------------------
 
 def retrieve_for_dataframe(
     df: pd.DataFrame,
@@ -184,36 +288,78 @@ def retrieve_for_dataframe(
     k: int = 5,
     query_column: str = "admission_note",
     queries: list = None,
+    rerank: bool = False,
+    fetch_k: int = 20,
 ) -> pd.DataFrame:
     """
-    Encodes admission notes with MedCPT-Query-Encoder (loaded once) and
-    retrieves the top-k most similar PubMed abstracts per row.
-    Stores results as 'retrieved_chunks' (list of strings).
+    Retrieves top-k PubMed abstracts per patient.
+
+    queries: list[list[str]] from generate_queries, or None to use raw admission notes.
+    rerank:  if True, fetches fetch_k candidates per query and re-ranks with
+             MedCPT-Cross-Encoder before trimming to top-k.
+    fetch_k: candidates to retrieve per query when re-ranking is enabled.
     """
     device = _get_device()
-    tokenizer, model = _load_model(QUERY_MODEL, device)
+    tokenizer_q, model_q = _load_model(QUERY_MODEL, device)
 
+    # Build a flat list of all queries and track how many each patient has.
     if queries is not None:
-        raw_queries = [str(q)[:500] for q in queries]
-        logger.info(f"Encoding {len(raw_queries)} rewritten queries ...")
+        flat_queries = [q[:500] for patient_qs in queries for q in patient_qs]
+        n_per_patient = [len(pqs) for pqs in queries]
     else:
-        raw_queries = [str(val)[:500] for val in df[query_column]]
-        logger.info(f"Encoding {len(raw_queries)} queries ...")
+        flat_queries = [str(val)[:500] for val in df[query_column]]
+        n_per_patient = [1] * len(df)
+
+    logger.info(
+        f"Encoding {len(flat_queries)} quer{'y' if len(flat_queries) == 1 else 'ies'} "
+        f"for {len(df)} patients ..."
+    )
 
     all_embs = []
-    for start in range(0, len(raw_queries), QUERY_BATCH_SIZE):
-        batch = raw_queries[start : start + QUERY_BATCH_SIZE]
-        all_embs.append(_encode_batch(batch, tokenizer, model, max_length=64, device=device))
+    for start in range(0, len(flat_queries), QUERY_BATCH_SIZE):
+        batch = flat_queries[start : start + QUERY_BATCH_SIZE]
+        all_embs.append(_encode_batch(batch, tokenizer_q, model_q, max_length=64, device=device))
 
-    del model
+    del model_q
     q_embs = np.vstack(all_embs)
 
-    _, indices = index.search(q_embs, k)
+    # How many candidates to fetch per FAISS query.
+    candidates_per_query = fetch_k if rerank else k
+    _, all_faiss_indices = index.search(q_embs, candidates_per_query)
 
-    retrieved_chunks_list = [
-        [texts[i] for i in row_idx if i != -1 and i < len(texts)]
-        for row_idx in indices
-    ]
+    # Group FAISS results by patient, merging and deduplicating across queries.
+    candidates_per_patient = []
+    offset = 0
+    for n_q in n_per_patient:
+        seen = set()
+        merged = []
+        for q_idx in range(n_q):
+            for idx in all_faiss_indices[offset + q_idx]:
+                if idx != -1 and idx < len(texts) and idx not in seen:
+                    seen.add(idx)
+                    merged.append(idx)
+        candidates_per_patient.append(merged)
+        offset += n_q
+
+    # Re-rank or trim to top-k.
+    if rerank:
+        logger.info(
+            f"Re-ranking with {CROSS_ENCODER_MODEL} "
+            f"({[len(c) for c in candidates_per_patient]} candidates per patient) ..."
+        )
+        tokenizer_ce, model_ce = _load_model(CROSS_ENCODER_MODEL, device)
+        retrieved_chunks_list = []
+        for patient_idx, candidate_indices in enumerate(candidates_per_patient):
+            note = str(df.iloc[patient_idx][query_column])
+            candidates = [texts[i] for i in candidate_indices]
+            ranked = _rerank_candidates(note, candidates, tokenizer_ce, model_ce, device, k)
+            retrieved_chunks_list.append(ranked)
+        del model_ce
+    else:
+        retrieved_chunks_list = [
+            [texts[i] for i in candidate_indices[:k]]
+            for candidate_indices in candidates_per_patient
+        ]
 
     df = df.copy()
     df["retrieved_chunks"] = retrieved_chunks_list
