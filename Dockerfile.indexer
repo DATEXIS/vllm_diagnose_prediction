@@ -11,6 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --upgrade pip
 
+# Install CUDA-enabled torch via pip so it takes precedence over the
+# conda-installed one; without this, `pip install transformers` installs
+# a CPU-only torch on top, making AutoModel fail with "PyTorch not found".
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121
+
 RUN pip install --no-cache-dir --timeout 1000 \
     transformers \
     faiss-cpu \
