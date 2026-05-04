@@ -175,7 +175,7 @@ async def _rewrite_one(
         max_tokens = 200
     else:
         prompt = _MULTI_QUERY_PROMPT.format(n=n_queries, note=note[:3000])
-        max_tokens = 100 * n_queries
+        max_tokens = 200 * n_queries
 
     payload = {
         "model": model,
