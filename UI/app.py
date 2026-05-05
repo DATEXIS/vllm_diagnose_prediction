@@ -4,6 +4,7 @@ import ast
 import json
 import re
 import shutil
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -166,68 +167,167 @@ def _parse_think_block(think_block: str) -> list[dict[str, Any]]:
     return out
 
 
-def _render_patient_view(row: pd.Series) -> None:
-    st.subheader("Loop A: Patient Iterations")
+def _extract_note_summary(note: str, max_lines: int = 10) -> str:
+    lines = [ln.strip() for ln in note.splitlines() if ln.strip()]
+    if not lines:
+        return "(no admission note)"
+    return "\n".join(lines[:max_lines])
 
-    gt_codes = _coerce_list(row.get("true_codes"))
-    pred_codes = _coerce_list(row.get("parsed_predictions"))
+
+def _normalize_code(code: Any) -> str:
+    txt = str(code).strip().upper().replace(".", "")
+    return txt[:3] if txt else ""
+
+
+def _build_iteration_records(row: pd.Series) -> list[dict[str, Any]]:
+    parsed = _parse_think_block(str(row.get("think_block_final", "")))
+    if parsed:
+        parsed.sort(key=lambda x: x["iteration"])
+        return parsed
+
+    fallback = [_normalize_code(c) for c in _coerce_list(row.get("parsed_predictions"))]
+    fallback = [c for c in fallback if c]
+    if fallback:
+        return [{"iteration": 0, "prediction": fallback, "instructions": []}]
+    return []
+
+
+def _box(title: str, body_html: str, bg: str, height: int) -> None:
+    st.markdown(
+        f"""
+<div style="background:{bg}; border-radius:8px; padding:10px; margin-bottom:8px; color:#111111;">
+  <div style="font-weight:700; margin-bottom:6px; color:#000000;">{escape(title)}</div>
+  <div style="max-height:{height}px; overflow-y:auto; white-space:pre-wrap; line-height:1.35; color:#000000;">
+    {body_html}
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_codes_list(codes: list[str]) -> str:
+    if not codes:
+        return "(none)"
+    return "<br>".join(escape(c) for c in codes)
+
+
+def _render_instruction_list(instructions: list[str]) -> str:
+    if not instructions:
+        return "(no instructions yet)"
+    return "<br>".join(f"- {escape(i)}" for i in instructions)
+
+
+def _render_patient_view(row: pd.Series, pane_scale: str, custom_height: int) -> None:
+    st.subheader("Loop A: Single-View Replay")
+    gt_codes = sorted({_normalize_code(c) for c in _coerce_list(row.get("true_codes")) if _normalize_code(c)})
     halt_reason = row.get("halt_reason", "")
     iterations = int(row.get("iterations", 0) or 0)
+    iter_records = _build_iteration_records(row)
+    if not iter_records:
+        st.warning("No iteration records found for this patient.")
+        return
 
-    c1, c2, c3 = st.columns(3)
+    max_t = max(r["iteration"] for r in iter_records)
+    current_t = st.slider("Iteration", min_value=0, max_value=max_t, value=max_t, step=1)
+    by_t = {r["iteration"]: r for r in iter_records}
+    selected = by_t.get(current_t, iter_records[-1])
+
+    pred_codes = sorted({_normalize_code(c) for c in selected["prediction"] if _normalize_code(c)})
+    pred_set, gt_set = set(pred_codes), set(gt_codes)
+    tp_codes = sorted(pred_set & gt_set)
+    fp_codes = sorted(pred_set - gt_set)
+    fn_codes = sorted(gt_set - pred_set)
+
+    cumulative_instructions: list[str] = []
+    for t in range(0, current_t + 1):
+        rec = by_t.get(t)
+        if rec:
+            # newest on top in the instruction window
+            cumulative_instructions = rec["instructions"] + cumulative_instructions
+
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Iterations", iterations)
-    c2.metric("Ground Truth Codes", len(gt_codes))
-    c3.metric("Final Predicted Codes", len(pred_codes))
-    st.caption(f"Verifier halt reason: `{halt_reason}`")
+    c2.metric("Current t", current_t)
+    c3.metric("Ground Truth", len(gt_codes))
+    c4.metric("Verifier halt", str(halt_reason))
 
-    with st.expander("Admission note", expanded=False):
-        st.text(row.get("admission_note", ""))
+    st.markdown(
+        """
+<div style="border:1px solid var(--secondary-background-color); border-radius:8px; padding:8px 12px; margin:10px 0 14px 0; background:var(--secondary-background-color);">
+  <div style="font-weight:700; margin-bottom:4px;">Flow</div>
+  <div style="font-size:0.95rem; color:var(--text-color);">
+    Admission Note
+    <span style="padding:0 8px;">→</span>
+    Prediction Buckets (TP/FP/FN)
+    <span style="padding:0 8px;">→</span>
+    Retrieved Instructions
+    <span style="padding:0 8px;">→</span>
+    Next Iteration
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
-    with st.expander("Ground truth vs final prediction", expanded=True):
-        st.write("**Ground truth (3-digit):**", ", ".join(map(str, gt_codes)) or "(none)")
-        st.write("**Predicted (3-digit):**", ", ".join(map(str, pred_codes)) or "(none)")
+    note_full = str(row.get("admission_note", ""))
+    show_full_note = st.toggle("Show full admission note", value=False)
+    note_text = note_full if show_full_note else _extract_note_summary(note_full, max_lines=10)
 
-    parsed_iters = _parse_think_block(str(row.get("think_block_final", "")))
-    if parsed_iters:
-        for it in parsed_iters:
-            with st.container(border=True):
-                st.markdown(f"**Iteration t={it['iteration']}**")
-                st.write("Prediction:", ", ".join(it["prediction"]) or "(none)")
-                if it["instructions"]:
-                    st.write("Retrieved instructions:")
-                    for ins in it["instructions"]:
-                        st.markdown(f"- {ins}")
-                else:
-                    st.write("Retrieved instructions: none")
+    scale_map = {
+        "Small": {"note": 280, "instr": 180, "tp": 90, "fp": 100, "fn": 100, "pred": 90},
+        "Medium": {"note": 360, "instr": 250, "tp": 110, "fp": 130, "fn": 130, "pred": 110},
+        "Large": {"note": 460, "instr": 340, "tp": 130, "fp": 170, "fn": 170, "pred": 130},
+    }
+    if pane_scale == "Custom":
+        h = max(120, custom_height)
+        heights = {
+            "note": h,
+            "instr": int(h * 0.7),
+            "tp": int(h * 0.32),
+            "fp": int(h * 0.38),
+            "fn": int(h * 0.38),
+            "pred": int(h * 0.32),
+        }
     else:
-        st.warning("Could not parse iteration trace from think block for this patient.")
+        heights = scale_map.get(pane_scale, scale_map["Medium"])
 
-    with st.expander("Raw generator response"):
-        st.text(str(row.get("raw_response", "")))
+    left, mid, right = st.columns([1.1, 0.14, 1.0])
+    with left:
+        _box("Admission Note", escape(note_text), "#dce7f8", heights["note"])
+        st.markdown(
+            "<div style='text-align:center; font-size:1.25rem; margin:2px 0 4px 0; color:var(--text-color);'>↑</div>",
+            unsafe_allow_html=True,
+        )
+        _box(
+            "All Instructions (cumulative, newest first)",
+            _render_instruction_list(cumulative_instructions),
+            "#fbf3ba",
+            heights["instr"],
+        )
+        st.markdown(
+            "<div style='text-align:center; font-size:0.88rem; color:var(--text-color); margin-top:-2px;'>Instructions feed back into the next iteration</div>",
+            unsafe_allow_html=True,
+        )
 
+    with mid:
+        st.markdown(
+            """
+<div style="height: 100%; display:flex; flex-direction:column; justify-content:space-around; align-items:center; color:var(--text-color);">
+  <div style="font-size:1.35rem;">→</div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
 
-def _render_loop_b(summary: dict[str, Any], meta_df: pd.DataFrame) -> None:
-    st.subheader("Loop B: Meta-Verifier Summary")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Meta instructions rows", int(summary.get("meta_verifier_instructions", {}).get("nrows", 0)))
-    c2.metric("Final iteration", int(summary.get("iteration", 0)))
-    c3.metric("Final micro F1", f"{float(summary.get('f1_micro', 0.0)):.4f}")
-
-    keep_cols = [
-        "instruction_id",
-        "type",
-        "target_codes",
-        "instruction_text",
-        "efficacy_score",
-        "source_hadm_ids",
-    ]
-    show_cols = [c for c in keep_cols if c in meta_df.columns]
-    top_df = meta_df.copy()
-    if "efficacy_score" in top_df.columns:
-        top_df["efficacy_score"] = pd.to_numeric(top_df["efficacy_score"], errors="coerce").fillna(0.0)
-        top_df = top_df.sort_values("efficacy_score", ascending=False)
-    st.write("Top instruction rows")
-    st.dataframe(top_df[show_cols].head(50), use_container_width=True)
+    with right:
+        _box("True Predictions (TP)", _render_codes_list(tp_codes), "#b9f0c8", heights["tp"])
+        st.markdown("<div style='text-align:center; color:var(--text-color); margin:-2px 0 2px 0;'>↓</div>", unsafe_allow_html=True)
+        _box("False Predictions (FP)", _render_codes_list(fp_codes), "#ffb5b5", heights["fp"])
+        st.markdown("<div style='text-align:center; color:var(--text-color); margin:-2px 0 2px 0;'>↓</div>", unsafe_allow_html=True)
+        _box("Missed Predictions (FN)", _render_codes_list(fn_codes), "#ffb5b5", heights["fn"])
+        st.markdown("<div style='text-align:center; color:var(--text-color); margin:-2px 0 2px 0;'>↓</div>", unsafe_allow_html=True)
+        _box("Predicted at current t", _render_codes_list(pred_codes), "#ececec", heights["pred"])
 
 
 def _render_run_level(history_csv: Path, output_log: Path, summary: dict[str, Any]) -> None:
@@ -304,28 +404,25 @@ def main() -> None:
         st.session_state["active_run_dir"] = str(run_dir)
 
     sample_table = _find_file(run_dir, "*sample_predictions*.table.json")
-    meta_table = _find_file(run_dir, "*meta_verifier_instructions*.table.json")
     summary_path = _find_file(run_dir, "wandb-summary.json")
     output_log = _find_file(run_dir, "output.log")
 
     sample_df = _load_table_json(str(sample_table))
-    meta_df = _load_table_json(str(meta_table))
     summary = json.loads(summary_path.read_text())
 
     patient_count = len(sample_df)
     max_default = min(20, patient_count)
     visible_n = st.sidebar.slider("Visible patient pool", min_value=1, max_value=patient_count, value=max_default)
     index = st.sidebar.number_input("Patient index", min_value=1, max_value=visible_n, value=1, step=1)
+    pane_scale = st.sidebar.selectbox("Pane size", options=["Small", "Medium", "Large", "Custom"], index=1)
+    custom_height = st.sidebar.slider("Custom base pane height (px)", min_value=180, max_value=700, value=380, step=20)
     st.caption(f"Active run directory: `{run_dir}`")
 
     row = sample_df.iloc[int(index) - 1]
-    _render_patient_view(row)
-
-    st.divider()
-    _render_loop_b(summary, meta_df)
-
-    history_csv = run_dir / "history_metrics.csv"
-    _render_run_level(history_csv, output_log, summary)
+    _render_patient_view(row, pane_scale, custom_height)
+    with st.expander("Run-level diagnostics", expanded=False):
+        history_csv = run_dir / "history_metrics.csv"
+        _render_run_level(history_csv, output_log, summary)
 
 
 if __name__ == "__main__":

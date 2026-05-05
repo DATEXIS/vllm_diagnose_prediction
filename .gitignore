@@ -133,4 +133,5 @@ dmypy.json
 # macOS
 .DS_Store
 .ui_tmp_venv/
-UI/wandb_cache/
+config.json
+opencode.json
