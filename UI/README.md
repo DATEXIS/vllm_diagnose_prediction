@@ -23,6 +23,8 @@ pip install protobuf==6.32.1
 Default startup data uses cached run `2bzc4wvd`.  
 You can paste another W&B run URL/path in the sidebar.
 
+ICD descriptions are loaded from `UI/ICD_names/*.csv` (ICD-10-CM / ICD-9 files with code + short description columns).
+
 ## Cache behavior
 
 - Downloads are stored under `UI/wandb_cache/<run_id>/`

@@ -4,6 +4,7 @@ import ast
 import json
 import re
 import shutil
+from collections import defaultdict
 from html import escape
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ DEFAULT_RUN_ID = "2bzc4wvd"
 DEFAULT_RUN_PATH = f"datexis-phd/ICD-prediction/{DEFAULT_RUN_ID}"
 APP_ROOT = Path(__file__).resolve().parent
 CACHE_ROOT = APP_ROOT / "wandb_cache"
+ICD_NAMES_DIR = APP_ROOT / "ICD_names"
 APP_CONFIG_PATH = APP_ROOT.parent / "config.json"
 
 TABLE_SAMPLE_GLOB = "sample_predictions"
@@ -179,6 +181,121 @@ def _normalize_code(code: Any) -> str:
     return txt[:3] if txt else ""
 
 
+def _norm_icd_csv_code(raw: str, digits_only: bool) -> str:
+    s = str(raw).strip().upper().replace(".", "").replace(" ", "")
+    if digits_only:
+        s = "".join(ch for ch in s if ch.isdigit())
+    return s
+
+
+def _category_map_from_pairs(pairs: list[tuple[str, str]], digits_only: bool) -> dict[str, str]:
+    """Map 3-character category key -> short description."""
+    buckets: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for code, desc in pairs:
+        if not code or not desc:
+            continue
+        if digits_only:
+            d = "".join(ch for ch in code if ch.isdigit())
+            if len(d) < 3:
+                continue
+            k3 = d[:3]
+            buckets[k3].append((d, desc))
+            continue
+        if not code[0].isalpha() or len(code) < 3:
+            continue
+        k3 = code[:3]
+        buckets[k3].append((code, desc))
+
+    out: dict[str, str] = {}
+    for k3, cands in buckets.items():
+        end9 = [(c, d) for c, d in cands if c.endswith("9")]
+        pool = end9 if end9 else cands
+        _, best_desc = min(pool, key=lambda x: (len(x[0]), x[0]))
+        out[k3] = best_desc
+    return out
+
+
+def _resolve_icd_description(
+    norm: str,
+    exact_10: dict[str, str],
+    cat_10: dict[str, str],
+    exact_9: dict[str, str],
+    cat_9: dict[str, str],
+) -> str | None:
+    if not norm:
+        return None
+    if norm[0].isalpha():
+        if norm in exact_10:
+            return exact_10[norm]
+        return cat_10.get(norm)
+    if norm.isdigit():
+        if norm in exact_9:
+            return exact_9[norm]
+        return cat_9.get(norm)
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def _icd_bundle() -> tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]:
+    """Picklable ICD maps: (exact_10, cat_10, exact_9, cat_9)."""
+    exact_10: dict[str, str] = {}
+    exact_9: dict[str, str] = {}
+    pairs_10: list[tuple[str, str]] = []
+    pairs_9: list[tuple[str, str]] = []
+
+    if not ICD_NAMES_DIR.is_dir():
+        return ({}, {}, {}, {})
+
+    for path in sorted(ICD_NAMES_DIR.glob("*.csv")):
+        nl = path.name.lower()
+        if "icd_codes_10" in nl:
+            kind = "10"
+        elif "icd_codes_9" in nl:
+            kind = "9"
+        else:
+            continue
+        df = pd.read_csv(path, dtype=str, keep_default_na=False)
+        col_by_upper = {str(c).strip().upper(): c for c in df.columns}
+        if kind == "10":
+            code_col = col_by_upper.get("CODE")
+            desc_col = col_by_upper.get("SHORT DESCRIPTION")
+        else:
+            code_col = col_by_upper.get("DIAGNOSIS CODE")
+            desc_col = col_by_upper.get("SHORT DESCRIPTION")
+        if code_col is None or desc_col is None:
+            continue
+
+        for _, row in df.iterrows():
+            desc = str(row[desc_col]).strip()
+            if not desc:
+                continue
+            if kind == "10":
+                cn = _norm_icd_csv_code(row[code_col], digits_only=False)
+                if len(cn) < 3 or not cn[0].isalpha():
+                    continue
+                exact_10[cn] = desc
+                pairs_10.append((cn, desc))
+            else:
+                cn = _norm_icd_csv_code(row[code_col], digits_only=True)
+                if len(cn) < 3:
+                    continue
+                exact_9[cn] = desc
+                pairs_9.append((cn, desc))
+
+    cat_10 = _category_map_from_pairs(pairs_10, digits_only=False)
+    cat_9 = _category_map_from_pairs(pairs_9, digits_only=True)
+
+    return (exact_10, cat_10, exact_9, cat_9)
+
+
+def _format_code_line(code: str, bundle: tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]]) -> str:
+    e10, c10, e9, c9 = bundle
+    name = _resolve_icd_description(code, e10, c10, e9, c9)
+    if name:
+        return f"{escape(code)} — {escape(name)}"
+    return escape(code)
+
+
 def _build_iteration_records(row: pd.Series) -> list[dict[str, Any]]:
     parsed = _parse_think_block(str(row.get("think_block_final", "")))
     if parsed:
@@ -206,10 +323,13 @@ def _box(title: str, body_html: str, bg: str, height: int) -> None:
     )
 
 
-def _render_codes_list(codes: list[str]) -> str:
+def _render_codes_list(
+    codes: list[str],
+    bundle: tuple[dict[str, str], dict[str, str], dict[str, str], dict[str, str]],
+) -> str:
     if not codes:
         return "(none)"
-    return "<br>".join(escape(c) for c in codes)
+    return "<br>".join(_format_code_line(c, bundle) for c in codes)
 
 
 def _render_instruction_list(instructions: list[str]) -> str:
@@ -220,6 +340,7 @@ def _render_instruction_list(instructions: list[str]) -> str:
 
 def _render_patient_view(row: pd.Series, pane_scale: str, custom_height: int) -> None:
     st.subheader("Loop A: Single-View Replay")
+    icd_bundle = _icd_bundle()
     gt_codes = sorted({_normalize_code(c) for c in _coerce_list(row.get("true_codes")) if _normalize_code(c)})
     halt_reason = row.get("halt_reason", "")
     iterations = int(row.get("iterations", 0) or 0)
@@ -321,13 +442,13 @@ def _render_patient_view(row: pd.Series, pane_scale: str, custom_height: int) ->
         )
 
     with right:
-        _box("True Predictions (TP)", _render_codes_list(tp_codes), "#b9f0c8", heights["tp"])
+        _box("True Predictions (TP)", _render_codes_list(tp_codes, icd_bundle), "#b9f0c8", heights["tp"])
         st.markdown("<div style='text-align:center; color:var(--text-color); margin:-2px 0 2px 0;'>↓</div>", unsafe_allow_html=True)
-        _box("False Predictions (FP)", _render_codes_list(fp_codes), "#ffb5b5", heights["fp"])
+        _box("False Predictions (FP)", _render_codes_list(fp_codes, icd_bundle), "#ffb5b5", heights["fp"])
         st.markdown("<div style='text-align:center; color:var(--text-color); margin:-2px 0 2px 0;'>↓</div>", unsafe_allow_html=True)
-        _box("Missed Predictions (FN)", _render_codes_list(fn_codes), "#ffb5b5", heights["fn"])
+        _box("Missed Predictions (FN)", _render_codes_list(fn_codes, icd_bundle), "#ffb5b5", heights["fn"])
         st.markdown("<div style='text-align:center; color:var(--text-color); margin:-2px 0 2px 0;'>↓</div>", unsafe_allow_html=True)
-        _box("Predicted at current t", _render_codes_list(pred_codes), "#ececec", heights["pred"])
+        _box("Predicted at current t", _render_codes_list(pred_codes, icd_bundle), "#ececec", heights["pred"])
 
 
 def _render_run_level(history_csv: Path, output_log: Path, summary: dict[str, Any]) -> None:
