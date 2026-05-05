@@ -1,0 +1,6 @@
+streamlit
+wandb
+protobuf==6.32.1
+pandas
+pyarrow
+PyYAML

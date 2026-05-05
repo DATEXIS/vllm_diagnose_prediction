@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: merlin-ui
+  namespace: yxsg9647
+  labels:
+    app: merlin-ui
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: merlin-ui
+  template:
+    metadata:
+      labels:
+        app: merlin-ui
+    spec:
+      containers:
+        - name: streamlit-ui
+          image: registry.datexis.com/yxsg9647/merlin_2_ui:latest
+          ports:
+            - containerPort: 8501
+          env:
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secret
+                  key: api-key
+          resources:
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+      imagePullSecrets:
+        - name: private-registry-auth
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: merlin-ui
+  namespace: yxsg9647
+spec:
+  type: ClusterIP
+  selector:
+    app: merlin-ui
+  ports:
+    - protocol: TCP
+      port: 8501
+      targetPort: 8501
