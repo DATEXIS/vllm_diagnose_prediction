@@ -2,6 +2,10 @@
 
 Research-code style: no defensive guards. If WANDB_API_KEY is unset or
 init fails, the pipeline crashes — that is the desired behavior.
+
+Exception: transient HTTP 429 (rate-limit) errors from the wandb API are
+retried with exponential backoff before crashing. A single burst of parallel
+job starts can trigger 429s even with a valid key; a short wait resolves it.
 """
 
 from __future__ import annotations
@@ -9,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -20,6 +25,13 @@ from src.meta_verifier.schemas import Instruction
 
 logger = logging.getLogger(__name__)
 
+_RATE_LIMIT_MARKERS = ("429", "rate limit", "rate_limit")
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _RATE_LIMIT_MARKERS)
+
 
 # ----------------------------------------------------------------- init
 def init_wandb(config: Dict[str, Any]) -> None:
@@ -27,17 +39,34 @@ def init_wandb(config: Dict[str, Any]) -> None:
 
     Reads `wandb.project` / `wandb.entity` from the config. The API key
     must be set in the WANDB_API_KEY env var.
+
+    Retries up to 5 times on HTTP 429 with exponential backoff (30 s, 60 s,
+    120 s, 240 s). Any other exception propagates immediately.
     """
     if not os.environ.get("WANDB_API_KEY"):
         raise RuntimeError("WANDB_API_KEY not set in environment.")
     wandb_cfg = config.get("wandb", {}) or {}
-    wandb.init(
-        project=wandb_cfg.get("project", "ICD-prediction"),
-        entity=wandb_cfg.get("entity"),
-        name=config.get("run_name", config.get("job_name", "default")),
-        config=config,
-    )
-    logger.info(f"Wandb run: {wandb.run.name}")
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        try:
+            wandb.init(
+                project=wandb_cfg.get("project", "ICD-prediction"),
+                entity=wandb_cfg.get("entity"),
+                name=config.get("run_name", config.get("job_name", "default")),
+                config=config,
+            )
+            logger.info(f"Wandb run: {wandb.run.name}")
+            return
+        except Exception as exc:
+            if _is_rate_limit(exc) and attempt < max_attempts:
+                wait = 30 * (2 ** (attempt - 1))  # 30 s, 60 s, 120 s, 240 s
+                logger.warning(
+                    f"Wandb init rate-limited (attempt {attempt}/{max_attempts}), "
+                    f"retrying in {wait} s: {exc}"
+                )
+                time.sleep(wait)
+            else:
+                raise
 
 
 def finish_wandb() -> None:
@@ -65,6 +94,7 @@ def log_parameters(config: Dict[str, Any]) -> None:
             "merlin2.convergence_threshold": merlin2.get("convergence_threshold"),
             "merlin2.max_iterations": merlin2.get("max_iterations"),
             "merlin2.max_tokens_budget": merlin2.get("max_tokens_budget"),
+            "merlin2.per_iteration_token_budget": merlin2.get("per_iteration_token_budget"),
             "merlin2.learning_rate": merlin2.get("learning_rate"),
             "merlin2.min_support": merlin2.get("min_support"),
         },
@@ -116,7 +146,7 @@ def log_retrieval_type_pcts(events_df: pd.DataFrame) -> None:
     """
     if events_df.empty:
         return
-    paths = ["semantic", "threshold_fpr", "threshold_fnr"]
+    paths = ["semantic", "semantic_reason", "threshold_fpr", "threshold_fnr"]
     for iteration, grp in events_df.groupby("iteration"):
         total = len(grp)
         counts = grp["path"].value_counts()
@@ -153,18 +183,14 @@ def _download_parquet_artifact(
     full_name = f"{artifact_name}:{version}"
     try:
         artifact = wandb.use_artifact(full_name, type=artifact_type)
-    except wandb.errors.CommError as e:
-        msg = str(e).lower()
-        is_not_found = (
-            "does not exist" in msg or "not found" in msg or "no artifact" in msg
+    except wandb.errors.CommError:
+        if version != "latest":
+            raise
+        logger.info(
+            f"No '{artifact_type}' artifact '{full_name}' found in this project "
+            f"— starting with empty {artifact_type} store."
         )
-        if is_not_found and version == "latest":
-            logger.info(
-                f"No '{artifact_type}' artifact '{full_name}' found in this project "
-                f"— starting with empty {artifact_type} store."
-            )
-            return False
-        raise
+        return False
 
     art_dir = Path(artifact.download())
     parquet_files = list(art_dir.glob("*.parquet"))
@@ -178,7 +204,7 @@ def _download_parquet_artifact(
     shutil.copyfile(parquet_files[0], dst)
     logger.info(
         f"Downloaded {artifact_type} artifact {full_name} "
-        f"(v{artifact.version}) -> {dst}"
+        f"({artifact.version}) -> {dst}"
     )
     return True
 
