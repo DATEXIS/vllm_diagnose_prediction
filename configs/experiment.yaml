@@ -16,7 +16,7 @@ inference:
   max_tokens: 3000
   reasoning_budget: 1024
   concurrency: 64
-  guided_decoding: false
+  guided_decoding: true
 
 # Dataset configuration
 data:
@@ -24,7 +24,7 @@ data:
   target_col: "ICD_CODES"
   admission_col: "admission_note"
   discharge_col: "discharge_note"     # used by Meta-Verifier only
-  sample_size: 1000
+  sample_size: 1500
 
 # Model configuration
 model:
@@ -41,25 +41,23 @@ k8s:
     gpu_type: "b200"
     memory_limit: "1024Gi"
   client:
-    memory_limit: "256Gi"
+    gpu_type: "v100"
+    memory_limit: "128Gi"
 
 # MERLIN 2 configuration -- defaults locked per MERLIN2_SPEC.md §6.
 merlin2:
   enabled: true
-  sim_threshold: 0.95
+  sim_threshold: 0.85
   fpr_threshold: 0.5
   fnr_threshold: 0.5
   min_support: 2
   convergence_threshold: 0.9
   max_iterations: 5
-  max_tokens_budget: 1500
-  threshold_budget_fraction: 0.5  # fraction of max_tokens_budget reserved for FPR/FNR warnings
+  max_tokens_budget: 2000        # cumulative token cap across all iterations (Verifier halt)
+  per_iteration_token_budget: 400  # token cap per single retrieval call (Retriever)
+  threshold_budget_fraction: 0.5   # fraction of per_iteration_token_budget for FPR/FNR warnings
   learning_rate: 1.2
   instructions_path: "data/instructions.parquet"
-  # Wandb artifact roundtrip for the instruction store.
-  # On startup: pull this artifact (if it exists) into instructions_path,
-  # overwriting any local copy. After Loop B: log a new version iff
-  # the Meta-Verifier minted at least one new instruction.
   instructions_artifact_name: "instructions_db"
   instructions_artifact_version: "latest"
   # Co-occurrence (FN retrieval). Built once per train split via
@@ -79,7 +77,7 @@ merlin2:
 
 # Meta-Verifier (Loop B) -- toggle to mint instructions after a Loop-A pass.
 meta_verifier:
-  enabled: True
+  enabled: true
   embedding_model: "NeuML/pubmedbert-base-embeddings"
   temperature: 0.4
-  max_tokens: 8192
+  max_tokens: 16384
