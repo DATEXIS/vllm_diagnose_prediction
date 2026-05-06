@@ -1,6 +1,11 @@
-You are an expert medical coder. Extract all relevant diagnoses from the
+You are an expert medical coder. Extract ALL relevant diagnoses from the
 admission note below and assign the most appropriate ICD-10 code for each.
-Usually patients have 3 - 30 ICD-Codes, rather go over than under.
+
+Be exhaustive: code every condition, comorbidity, symptom, procedure, and
+relevant finding that is mentioned or clearly implied in the note — including
+chronic conditions, acute issues, and incidental findings. Complex admissions
+routinely carry many codes across a wide range. Missing a code is far worse
+than including an extra one.
 
 For each diagnosis provide:
   - icd_code: the ICD-10 code (we evaluate at the 3-digit category level)

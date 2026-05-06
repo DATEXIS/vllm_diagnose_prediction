@@ -1,4 +1,3 @@
-<think>
-Reviewing previous prediction: {previous_codes}.
-{instruction_lines}
-</think>
+<coding_review>
+{content}
+</coding_review>
