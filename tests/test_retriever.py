@@ -185,6 +185,55 @@ class TestFNCooccurrencePath:
         result = r.retrieve("note", previous_predicted_codes=["I10"])
         assert result.instructions == []
 
+    def test_fn_warning_text_names_triggering_predicted_codes(self, patched_encoder):
+        # The warning text must tell the model which of its own predicted codes
+        # co-occur with the missed code — so it understands *why* the warning fired.
+        patched_encoder.return_value = [0.0, 0.0]
+        r = Retriever(
+            sim_threshold=0.99,
+            fnr_threshold=0.4,
+            cooccurrence_index={"I10": [("N18", 5.0)], "E11": [("N18", 4.0)]},
+            code_stats={"N18": _stat_fn("N18", 0.6, support_true=15)},
+        )
+        result = r.retrieve("note", previous_predicted_codes=["I10", "E11"])
+        assert len(result.instructions) == 1
+        text = result.instructions[0].instruction_text
+        # Both trigger codes must appear in the warning text
+        assert "I10" in text
+        assert "E11" in text
+
+    def test_fn_warning_objects_are_independent_across_cases(self, patched_encoder):
+        # Each case must get its own Instruction object with its own trigger-code
+        # text — not a shared mutable reference that can be overwritten by a
+        # later case in the same batch.
+        patched_encoder.return_value = [0.0, 0.0]
+        r = Retriever(
+            sim_threshold=0.99,
+            fnr_threshold=0.4,
+            cooccurrence_index={"I10": [("N18", 5.0)], "K92": [("N18", 4.0)]},
+            code_stats={"N18": _stat_fn("N18", 0.6, support_true=15)},
+        )
+        # Case 1: triggered via I10
+        result1 = r.retrieve("note", previous_predicted_codes=["I10"])
+        instr1 = result1.instructions[0]
+
+        # Case 2: triggered via K92 (different patient, different prediction)
+        result2 = r.retrieve("note", previous_predicted_codes=["K92"])
+        instr2 = result2.instructions[0]
+
+        # Each result must have correct trigger codes for its own case
+        assert "K92" in instr2.instruction_text
+        assert "I10" not in instr2.instruction_text
+
+        # Critical: result1's object must NOT have been mutated by case 2's retrieval
+        assert "I10" in instr1.instruction_text, (
+            "Case 1's FN warning was mutated by case 2 — objects are shared instead of independent"
+        )
+        assert "K92" not in instr1.instruction_text
+
+        # Confirm they are distinct objects (no aliasing)
+        assert instr1 is not instr2
+
 
 class TestSyntheticInstructionCaching:
     def test_same_id_across_iterations(self, patched_encoder):

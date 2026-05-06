@@ -100,7 +100,7 @@ def evaluate_predictions(df: pd.DataFrame, target_col: str):
     y_true_lists = [safe_parse_true_labels(v) for v in df[target_col].tolist()]
 
     valid_json_count = sum(1 for pred in y_pred_lists if pred)
-    valid_json_pct = (valid_json_count / len(predictions)) * 100
+    valid_json_pct = (valid_json_count / len(predictions))
     logger.info(
         f"Samples with non-empty predictions: {valid_json_count}/{len(predictions)} "
         f"({valid_json_pct:.1f}%)"

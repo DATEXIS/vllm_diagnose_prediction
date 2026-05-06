@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple  # noqa: F401 (Dict re-exported via type alias)
 
 import pandas as pd
 
@@ -77,6 +77,26 @@ def load_cooccurrence_index(
     return index
 
 
+def expand_cooccurring_with_parents(
+    index: CooccurrenceIndex,
+    predicted_codes: List[str],
+) -> Dict[str, List[str]]:
+    """For a set of predicted codes, return {cooccurring_code: [triggering_predicted_codes]}.
+
+    Excludes the predicted codes themselves — we only want codes that might
+    be missing, not ones the model already named.  The parent list tells the
+    caller *which* predicted codes drove a given FN candidate into scope, so
+    the warning text can mention them explicitly.
+    """
+    out: Dict[str, List[str]] = {}
+    predicted_set = set(predicted_codes)
+    for code in predicted_set:
+        for other, _lift in index.get(code, ()):
+            if other not in predicted_set:
+                out.setdefault(other, []).append(code)
+    return out
+
+
 def expand_cooccurring(
     index: CooccurrenceIndex,
     predicted_codes: List[str],
@@ -86,10 +106,4 @@ def expand_cooccurring(
     Excludes the predicted codes themselves — we only want codes that
     might be missing, not ones the model already named.
     """
-    out: set[str] = set()
-    predicted_set = set(predicted_codes)
-    for code in predicted_set:
-        for other, _lift in index.get(code, ()):
-            if other not in predicted_set:
-                out.add(other)
-    return out
+    return set(expand_cooccurring_with_parents(index, predicted_codes).keys())
