@@ -21,9 +21,10 @@ def main():
         return
 
     build_index(
-        abstracts_path=rag["abstracts_path"],
+        abstracts_path=rag.get("abstracts_path"),
         index_persist_dir=rag["index_persist_dir"],
         max_abstracts=rag.get("max_abstracts"),
+        precomputed_config=rag.get("precomputed_embeddings"),
     )
 
 

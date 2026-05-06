@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import pickle
 import re
@@ -64,15 +65,36 @@ def _encode_batch(batch: list, tokenizer, model, max_length: int, device: str) -
     return (emb / np.clip(norms, 1e-8, None)).astype(np.float32)
 
 
-def build_index(abstracts_path: str, index_persist_dir: str, max_abstracts: int = None):
+def build_index(
+    abstracts_path: str = None,
+    index_persist_dir: str = None,
+    max_abstracts: int = None,
+    precomputed_config: dict = None,
+):
     """
-    Streams PubMed abstracts in batches → encodes each batch with
-    MedCPT-Article-Encoder → adds directly to a FAISS IndexFlatIP.
+    Builds or loads a FAISS index.
 
-    Peak RAM = one batch of embeddings, not the full matrix.
-    Persists faiss.index (binary) + texts.pkl.
-    Returns (faiss_index, texts).
+    When precomputed_config.enabled is True, loads NCBI pre-computed
+    MedCPT embeddings (downloading them if needed) and builds an IVFPQ
+    index. Returns (faiss_index, TextAccessor).
+
+    Otherwise encodes abstracts_path from scratch with MedCPT-Article-
+    Encoder and builds an IndexFlatIP. Returns (faiss_index, list[str]).
     """
+    if precomputed_config and precomputed_config.get("enabled"):
+        return _build_index_from_precomputed(
+            precomputed_dir=precomputed_config["download_dir"],
+            index_persist_dir=index_persist_dir,
+            chunks=precomputed_config.get("chunks", list(range(34, 38))),
+            nlist=precomputed_config.get("nlist", 4096),
+            nprobes=precomputed_config.get("nprobes", 64),
+        )
+
+    return _build_index_from_abstracts(abstracts_path, index_persist_dir, max_abstracts)
+
+
+def _build_index_from_abstracts(abstracts_path: str, index_persist_dir: str, max_abstracts: int = None):
+    """Encodes a plain-text abstracts file and builds a FAISS IndexFlatIP."""
     import faiss
 
     persist_path = Path(index_persist_dir)
@@ -119,7 +141,7 @@ def build_index(abstracts_path: str, index_persist_dir: str, max_abstracts: int 
     if batch:
         flush(batch)
 
-    del model  # free model weights from RAM/VRAM
+    del model
 
     persist_path.mkdir(parents=True, exist_ok=True)
     faiss.write_index(index, str(index_file))
@@ -128,6 +150,180 @@ def build_index(abstracts_path: str, index_persist_dir: str, max_abstracts: int 
 
     logger.info(f"FAISS index saved: {index.ntotal} vectors, dim={index.d} → {index_persist_dir}")
     return index, texts
+
+
+# ---------------------------------------------------------------------------
+# Pre-computed NCBI MedCPT embeddings
+# ---------------------------------------------------------------------------
+
+_NCBI_FTP_BASE = "https://ftp.ncbi.nlm.nih.gov/pub/lu/MedCPT/pubmed_embeddings"
+_IVFPQ_M = 96    # subquantizers; 768 / 96 = 8 dims each → 96 bytes/vector
+_IVFPQ_NBITS = 8  # 256 centroids per subquantizer
+
+
+class TextAccessor:
+    """
+    Memory-efficient random access into a flat UTF-8 text file.
+    One abstract per line; byte offsets are pre-computed so each lookup
+    is a single seek + readline — no texts held in RAM.
+    Implements the same __getitem__ / __len__ interface as a plain list
+    so retrieve_for_dataframe works without changes.
+    """
+
+    def __init__(self, file_path: str, offsets: np.ndarray):
+        self._path = file_path
+        self._offsets = offsets
+        self._fh = open(file_path, "rb")
+
+    def __len__(self) -> int:
+        return len(self._offsets)
+
+    def __getitem__(self, idx: int) -> str:
+        self._fh.seek(int(self._offsets[idx]))
+        return self._fh.readline().decode("utf-8").rstrip("\n")
+
+    def __del__(self):
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+
+
+def _download_file(url: str, dest: Path) -> None:
+    """Stream-download url → dest with resume support."""
+    import requests
+
+    existing = dest.stat().st_size if dest.exists() else 0
+    headers = {"Range": f"bytes={existing}-"} if existing else {}
+    mode = "ab" if existing else "wb"
+
+    with requests.get(url, headers=headers, stream=True, timeout=3600) as r:
+        if r.status_code == 416:  # Range Not Satisfiable → file already complete
+            return
+        r.raise_for_status()
+        with open(dest, mode) as f:
+            for chunk in r.iter_content(chunk_size=8 * 1024 * 1024):
+                f.write(chunk)
+
+
+def _download_chunks(precomputed_path: Path, chunks: list) -> None:
+    for chunk_id in chunks:
+        for prefix, ext in [("embeds", "npy"), ("pubmed", "json"), ("pmids", "json")]:
+            name = f"{prefix}_chunk_{chunk_id}.{ext}"
+            dest = precomputed_path / name
+            if dest.exists():
+                logger.info(f"  Already present: {name}")
+                continue
+            url = f"{_NCBI_FTP_BASE}/{name}"
+            logger.info(f"  Downloading {url} ...")
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
+            try:
+                _download_file(url, tmp)
+                tmp.rename(dest)
+            except Exception as e:
+                if tmp.exists():
+                    tmp.unlink()
+                raise RuntimeError(f"Download failed for {url}: {e}")
+
+
+def _build_index_from_precomputed(
+    precomputed_dir: str,
+    index_persist_dir: str,
+    chunks: list,
+    nlist: int = 4096,
+    nprobes: int = 64,
+):
+    """
+    Builds (or loads) a FAISS IVFPQ index from NCBI pre-computed embeddings.
+
+    IVFPQ compresses 768-dim float32 vectors to 96 bytes each, so even
+    4 M articles only need ~400 MB of RAM for the index at query time
+    (vs ~12 GB for IndexFlatIP).
+
+    Returns (faiss_index, TextAccessor) — same interface as _build_index_from_abstracts.
+    """
+    import faiss
+
+    persist_path = Path(index_persist_dir)
+    precomputed_path = Path(precomputed_dir)
+
+    index_file   = persist_path / "faiss.index"
+    offsets_file = persist_path / "text_offsets.npy"
+    texts_file   = persist_path / "texts.txt"
+
+    if index_file.exists() and offsets_file.exists() and texts_file.exists():
+        logger.info(f"Loading cached FAISS index from {index_persist_dir}")
+        index = faiss.read_index(str(index_file))
+        index.nprobe = nprobes
+        offsets = np.load(str(offsets_file))
+        logger.info(f"Index loaded: {index.ntotal:,} vectors, dim={index.d}")
+        return index, TextAccessor(str(texts_file), offsets)
+
+    precomputed_path.mkdir(parents=True, exist_ok=True)
+    persist_path.mkdir(parents=True, exist_ok=True)
+
+    # 1. Download missing chunk files
+    logger.info(f"Checking/downloading chunks {chunks} from NCBI FTP ...")
+    _download_chunks(precomputed_path, chunks)
+
+    # 2. Load first chunk as IVFPQ training sample
+    first_npy = precomputed_path / f"embeds_chunk_{chunks[0]}.npy"
+    logger.info(f"Loading training sample from {first_npy.name} ...")
+    training = np.load(str(first_npy)).astype(np.float32)
+    dim = training.shape[1]  # 768
+
+    # 3. Train IVFPQ index
+    quantizer = faiss.IndexFlatIP(dim)
+    index = faiss.IndexIVFPQ(
+        quantizer, dim, nlist, _IVFPQ_M, _IVFPQ_NBITS, faiss.METRIC_INNER_PRODUCT
+    )
+    logger.info(f"Training IVFPQ (nlist={nlist}) on {len(training):,} vectors ...")
+    index.train(training)
+    del training
+
+    # 4. Stream all chunks: add embeddings + write texts file
+    offsets: list = []
+    byte_pos = 0
+
+    with open(texts_file, "wb") as tf:
+        for chunk_id in tqdm(chunks, desc="Indexing chunks"):
+            emb_path    = precomputed_path / f"embeds_chunk_{chunk_id}.npy"
+            pubmed_path = precomputed_path / f"pubmed_chunk_{chunk_id}.json"
+            pmids_path  = precomputed_path / f"pmids_chunk_{chunk_id}.json"
+
+            logger.info(f"  Adding chunk {chunk_id} to FAISS ...")
+            embeddings = np.load(str(emb_path)).astype(np.float32)
+            index.add(embeddings)
+            del embeddings
+
+            with open(pubmed_path, "r", encoding="utf-8") as pf:
+                pubmed_data = json.load(pf)
+            with open(pmids_path, "r", encoding="utf-8") as pmf:
+                pmids = json.load(pmf)
+
+            for pmid in pmids:
+                article  = pubmed_data.get(str(pmid), {})
+                title    = article.get("t", "").strip()
+                abstract = article.get("a", "").strip()
+                text     = f"{title}. {abstract}" if title else abstract
+                encoded  = (text.replace("\n", " ") + "\n").encode("utf-8")
+                offsets.append(byte_pos)
+                tf.write(encoded)
+                byte_pos += len(encoded)
+
+            del pubmed_data, pmids
+
+    offsets_arr = np.array(offsets, dtype=np.int64)
+    index.nprobe = nprobes
+
+    faiss.write_index(index, str(index_file))
+    np.save(str(offsets_file), offsets_arr)
+
+    logger.info(
+        f"FAISS IVFPQ index saved: {index.ntotal:,} vectors, "
+        f"dim={index.d} → {index_persist_dir}"
+    )
+    return index, TextAccessor(str(texts_file), offsets_arr)
 
 
 # ---------------------------------------------------------------------------

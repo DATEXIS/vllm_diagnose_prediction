@@ -20,7 +20,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 4Gi
+      storage: 50Gi  # 4 precomputed chunks ≈ 19 GB download + index; increase for more chunks
 """
 
 UPLOADER_POD_TEMPLATE = """apiVersion: v1

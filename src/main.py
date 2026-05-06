@@ -50,9 +50,10 @@ async def main_async(config: dict):
     if rag_config.get('enabled', False):
         logger.info("RAG enabled – starting retrieval ...")
         index, texts = build_index(
-            abstracts_path=rag_config['abstracts_path'],
+            abstracts_path=rag_config.get('abstracts_path'),
             index_persist_dir=rag_config['index_persist_dir'],
             max_abstracts=rag_config.get('max_abstracts'),
+            precomputed_config=rag_config.get('precomputed_embeddings'),
         )
 
         rewritten_queries = None

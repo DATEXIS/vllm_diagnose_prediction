@@ -2,7 +2,7 @@
 # Changed per experiment/run (no server rebuild required for most params)
 
 # Run identification
-job_name: "experiment-query-reranking"
+job_name: "experiment-medcpt"
 run_name: "qwen8b-guided-decoding"
 
 # Logging level
@@ -19,7 +19,7 @@ inference:
 data:
   patients_file: "data/mimic/patients_1411.pq"
   target_col: "ICD_CODES"
-  sample_size: 40
+  sample_size: 1000
 
 # Model configuration
 model:
@@ -31,15 +31,26 @@ model:
 
 rag:
   enabled: true
-  abstracts_path: "data/pubmed/pubmed_abstracts_random_lines_250k.txt"
   index_persist_dir: "data/pubmed/index"
   top_k: 5
-  max_abstracts: null # null = use all 250k; set a number to cap (e.g. 50000) if PVC space is tight
+
+  # Classic mode (encode locally with MedCPT-Article-Encoder)
+  abstracts_path: "data/pubmed/pubmed_abstracts_random_lines_250k.txt"
+  max_abstracts: null
+
+  # Pre-computed NCBI embeddings (recommended; disable classic mode above)
+  precomputed_embeddings:
+    enabled: true          # set to true to use NCBI pre-computed MedCPT embeddings
+    download_dir: "data/pubmed/precomputed"   # where chunk files are stored on the PVC
+    chunks: [34, 35, 36, 37] # chunk IDs to use (0–37, ~1M articles each, ~3 GB/chunk)
+    nlist: 4096              # FAISS IVF clusters; training needs ≥ 39 × nlist vectors
+    nprobes: 64              # search-time probes (higher = better recall, slower query)
+
   query_rewriting:
     enabled: true  # rewrite admission notes into focused medical queries before retrieval
     n_queries: 3   # >1 generates diverse query variants covering different aspects of the note
   reranking:
-    enabled: false # re-rank retrieved candidates with MedCPT-Cross-Encoder before trimming to top_k
+    enabled: true  # re-rank retrieved candidates with MedCPT-Cross-Encoder before trimming to top_k
     fetch_k: 20    # candidates to fetch per query before re-ranking (should be > top_k)
 
 # Kubernetes cluster configuration
