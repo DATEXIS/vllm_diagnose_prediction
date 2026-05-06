@@ -22,7 +22,8 @@ RUN pip install --no-cache-dir --timeout 1000 --prefer-binary \
     pyyaml \
     huggingface_hub \
     pandas \
-    numpy
+    numpy \
+    requests
 
 COPY src/retriever.py src/retriever.py
 COPY src/build_index_entrypoint.py src/build_index_entrypoint.py
