@@ -284,6 +284,7 @@ class MetaVerifier:
                 Instruction(
                     instruction_id=next_id,
                     type=inst_type,
+                    section=item.section or "",
                     instruction_text=item.instruction_text,
                     description=item.description,
                     target_codes=three_digit,

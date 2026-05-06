@@ -60,10 +60,45 @@ from src.utils.embeddings import encode_single_text
 logger = logging.getLogger(__name__)
 
 
-SEMANTIC = "semantic"
-SEMANTIC_REASON = "semantic_reason"
 THRESHOLD_FPR = "threshold_fpr"
 THRESHOLD_FNR = "threshold_fnr"
+
+# Per-section semantic paths — one constant per known admission note section.
+# SEM_NOTE is the fallback used when no section breakdown is available (e.g.
+# the full note is embedded as a single chunk, or the section name is unknown).
+SEM_COMPLAINT = "sem_complaint"   # CHIEF COMPLAINT
+SEM_ILLNESS   = "sem_illness"     # PRESENT ILLNESS
+SEM_MED_HIST  = "sem_med_hist"    # MEDICAL HISTORY
+SEM_MEDICATION = "sem_medication" # MEDICATION ON ADMISSION
+SEM_ALLERGIES  = "sem_allergies"  # ALLERGIES
+SEM_EXAM       = "sem_exam"       # PHYSICAL EXAM
+SEM_FAMILY     = "sem_family"     # FAMILY HISTORY
+SEM_SOCIAL     = "sem_social"     # SOCIAL HISTORY
+SEM_ICD        = "sem_icd"        # ICD-level reasoning (replaces semantic_reason)
+SEM_NOTE       = "sem_note"       # fallback: full note / unknown section
+
+_SECTION_TO_PATH: Dict[str, str] = {
+    "CHIEF COMPLAINT":       SEM_COMPLAINT,
+    "PRESENT ILLNESS":       SEM_ILLNESS,
+    "MEDICAL HISTORY":       SEM_MED_HIST,
+    "MEDICATION ON ADMISSION": SEM_MEDICATION,
+    "ALLERGIES":             SEM_ALLERGIES,
+    "PHYSICAL EXAM":         SEM_EXAM,
+    "FAMILY HISTORY":        SEM_FAMILY,
+    "SOCIAL HISTORY":        SEM_SOCIAL,
+}
+
+_THRESHOLD_PATHS = frozenset({THRESHOLD_FPR, THRESHOLD_FNR})
+
+
+def section_to_path(section_name: str) -> str:
+    """Map an admission note section name to its retrieval path constant."""
+    return _SECTION_TO_PATH.get(section_name.upper(), SEM_NOTE)
+
+
+def is_semantic_path(path: str) -> bool:
+    """Return True for any sem_* path (note sections or ICD reasoning)."""
+    return path.startswith("sem_")
 
 
 def synthetic_instruction_id(kind: str, code: str) -> int:
@@ -115,7 +150,7 @@ def _build_threshold_text(
 class RetrievalEvent:
     """A single retrieval hit, recorded for later threshold tuning."""
     instruction_id: int
-    path: str                      # SEMANTIC | SEMANTIC_REASON | THRESHOLD_FPR | THRESHOLD_FNR
+    path: str                      # sem_* (section/ICD) | threshold_fpr | threshold_fnr
     trigger_value: float           # cosine score, or fpr/fnr value
     efficacy_score: float
     target_codes: List[str] = field(default_factory=list)   # codes this instruction targets
@@ -142,6 +177,8 @@ class Retriever:
         threshold_budget_fraction: float = 0.5,
         cooccurrence_index: Optional[CooccurrenceIndex] = None,
         code_stats: Optional[CodeStatsIndex] = None,
+        section_names: Optional[List[str]] = None,
+        ignore_phrases: Optional[List[str]] = None,
     ):
         self.sim_threshold = sim_threshold
         self.fpr_threshold = fpr_threshold
@@ -165,6 +202,11 @@ class Retriever:
         # Per-code threshold stats (frozen rates from Loop B). Empty dict
         # disables the threshold path entirely.
         self._code_stats: CodeStatsIndex = code_stats or {}
+        # Section config: used by the pipeline to parse admission notes before
+        # calling retrieve(). Stored here so the pipeline can access them via
+        # retriever.section_names / retriever.ignore_phrases.
+        self.section_names: List[str] = list(section_names or [])
+        self.ignore_phrases: List[str] = list(ignore_phrases or [])
         # Persistent instructions, loaded from the parquet store.
         self._instructions: List[Instruction] = []
         # Synthesised threshold-warning instructions, cached so the
@@ -241,11 +283,14 @@ class Retriever:
         previous_reasons: Optional[List[str]] = None,
         note_embedding: Optional[List[float]] = None,
         reason_embeddings: Optional[List[List[float]]] = None,
+        note_sections: Optional[Dict[str, str]] = None,
+        section_embeddings: Optional[Dict[str, List[float]]] = None,
     ) -> RetrievalResult:
         """Retrieve instructions for one case at one iteration.
 
         Args:
-            admission_note: the raw admission note (used by the semantic path).
+            admission_note: the raw admission note (fallback when note_sections
+                is not provided).
             previous_predicted_codes: the 3-digit codes predicted at the
                 previous iteration. None or [] -> threshold path is skipped
                 (this is the t=0 case).
@@ -256,12 +301,21 @@ class Retriever:
                 independently and queried against the instruction store via
                 the semantic-reason path. None or [] -> path is inactive
                 (always the case at t=0 when there is no prior prediction).
-            note_embedding: pre-computed embedding for admission_note. When
-                provided, skips the encode_single_text() call for the semantic
-                path (used by _prefetch_retrieval for batch encoding).
+            note_embedding: pre-computed embedding for the full admission_note.
+                Ignored when note_sections / section_embeddings are provided.
+                Kept for backward compatibility with callers that do not pass
+                sections.
             reason_embeddings: pre-computed embeddings for each entry in
                 previous_reasons, in the same order. When provided, skips
                 per-reason encode_single_text() calls.
+            note_sections: pre-parsed, pre-filtered {section_name: content}
+                dict. When provided, the semantic path embeds each section
+                independently and OR's the hits together. The first section
+                to trigger a given instruction wins (no overwrite). Falls back
+                to the full admission note when None.
+            section_embeddings: pre-computed embeddings keyed by section name,
+                matching note_sections. When a section key is missing the
+                embedding is computed on the fly.
 
         Returns:
             A RetrievalResult containing the (deduped, budget-capped)
@@ -276,16 +330,35 @@ class Retriever:
         # ---- collect triggers per instruction (one event each) ---------
         triggered: dict[int, RetrievalEvent] = {}
 
-        # Semantic path
+        # Semantic path — iterate per section (or full note as fallback).
+        # The first section to trigger a given instruction wins; later
+        # sections cannot overwrite it.  This mirrors the admission-note-
+        # wins-over-semantic-reason priority already in place for the
+        # reason path below.
         if self._emb_matrix is not None and self._emb_matrix.size > 0:
-            raw = note_embedding if note_embedding is not None else encode_single_text(admission_note)
-            note_emb = np.asarray(raw, dtype=np.float32)
-            note_norm = float(np.linalg.norm(note_emb))
-            if note_norm > 0:
-                # cosine sims to all stored instructions with embeddings
-                dots = self._emb_matrix @ note_emb
-                denom = self._emb_norms * note_norm
-                # Avoid div-by-zero for instructions with zero-norm embeddings
+            sections_to_query: Dict[str, str]
+            if note_sections:
+                sections_to_query = note_sections
+            elif note_embedding is not None:
+                sections_to_query = {"_full": admission_note}
+            else:
+                sections_to_query = {"_full": admission_note}
+
+            for section_name, section_text in sections_to_query.items():
+                if section_embeddings and section_name in section_embeddings:
+                    raw: List[float] = section_embeddings[section_name]
+                elif not note_sections and note_embedding is not None:
+                    # backward-compat: caller pre-computed the full-note embedding
+                    raw = note_embedding
+                else:
+                    raw = encode_single_text(section_text)
+
+                sec_emb = np.asarray(raw, dtype=np.float32)
+                sec_norm = float(np.linalg.norm(sec_emb))
+                if sec_norm == 0:
+                    continue
+                dots = self._emb_matrix @ sec_emb
+                denom = self._emb_norms * sec_norm
                 with np.errstate(invalid="ignore", divide="ignore"):
                     sims = np.where(denom > 0, dots / denom, 0.0)
                 hits = np.where(sims >= self.sim_threshold)[0]
@@ -294,9 +367,12 @@ class Retriever:
                     instr = self._instructions[instr_idx]
                     if instr.instruction_id in already_retrieved_ids:
                         continue
+                    if instr.instruction_id in triggered:
+                        # First section to trigger this instruction wins.
+                        continue
                     triggered[instr.instruction_id] = RetrievalEvent(
                         instruction_id=instr.instruction_id,
-                        path=SEMANTIC,
+                        path=section_to_path(section_name),
                         trigger_value=float(sims[h]),
                         efficacy_score=instr.efficacy_score,
                         target_codes=list(instr.target_codes),
@@ -336,7 +412,7 @@ class Retriever:
                         continue
                     triggered[instr.instruction_id] = RetrievalEvent(
                         instruction_id=instr.instruction_id,
-                        path=SEMANTIC_REASON,
+                        path=SEM_ICD,
                         trigger_value=float(sims[h]),
                         efficacy_score=instr.efficacy_score,
                         target_codes=list(instr.target_codes),
@@ -414,7 +490,7 @@ class Retriever:
             key=lambda ev: (-ev.trigger_value, ev.instruction_id),
         )
         semantic_events = sorted(
-            [ev for ev in triggered.values() if ev.path in (SEMANTIC, SEMANTIC_REASON)],
+            [ev for ev in triggered.values() if is_semantic_path(ev.path)],
             key=lambda ev: (-ev.efficacy_score, ev.instruction_id),
         )
 

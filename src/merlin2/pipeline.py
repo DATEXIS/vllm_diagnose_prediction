@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from src.data.evaluate import normalize_icd
 from src.merlin2.generator import Generator, GenerateRequest, GenerateResult
 from src.merlin2.retriever import RetrievalEvent, RetrievalResult, Retriever
+from src.utils.admission_note_parser import filter_sections, load_section_config, parse_sections
 from src.utils.embeddings import encode_texts
 from src.merlin2.verifier import HaltReason, Verifier
 from src.meta_verifier.schemas import Instruction, InstructionType
@@ -37,6 +38,8 @@ class CaseState:
     admission_note: str
     ground_truth_codes: Optional[List[str]]   # None at test time
     rareness_factor: float                    # default 1.0; tunes efficacy reward
+    # Pre-parsed, pre-filtered admission note sections (set once at run() init).
+    note_sections: Dict[str, str] = field(default_factory=dict)
 
     # Per-iteration history (length grows by one each wave the case participates in)
     predictions: List[ICDsModel] = field(default_factory=list)
@@ -137,6 +140,12 @@ class MERLINPipeline:
         code_stats = load_code_stats(
             merlin2_cfg.get("code_stats_path", "data/code_stats.parquet"),
         )
+        section_cfg = load_section_config(
+            merlin2_cfg.get(
+                "admission_note_sections_path",
+                "configs/admission_note_sections.yaml",
+            )
+        )
         return Retriever(
             sim_threshold=merlin2_cfg.get("sim_threshold", 0.8),
             fpr_threshold=merlin2_cfg.get("fpr_threshold", 0.5),
@@ -146,6 +155,8 @@ class MERLINPipeline:
             threshold_budget_fraction=merlin2_cfg.get("threshold_budget_fraction", 0.5),
             cooccurrence_index=cooccurrence_index,
             code_stats=code_stats,
+            section_names=section_cfg.get("sections", []),
+            ignore_phrases=section_cfg.get("ignore_phrases", []),
         )
 
     def _build_verifier(self) -> Verifier:
@@ -187,6 +198,17 @@ class MERLINPipeline:
             )
             for i in range(n)
         ]
+
+        # Parse admission note sections once per case at startup so
+        # _prefetch_retrieval can batch-encode them efficiently.
+        if self.retriever.section_names:
+            for s in states:
+                parsed = parse_sections(s.admission_note, self.retriever.section_names)
+                s.note_sections = filter_sections(parsed, self.retriever.ignore_phrases)
+            logger.debug(
+                "[PIPELINE] Section parsing: avg %.1f non-empty sections per case",
+                sum(len(s.note_sections) for s in states) / max(n, 1),
+            )
 
         empty_db = len(self.retriever.instructions) == 0
 
@@ -254,36 +276,57 @@ class MERLINPipeline:
         """Run the Retriever for all live cases (used at t>=1 to detect
         zero-new-instructions before paying for a generator call).
 
-        All admission notes and reason texts are encoded in a single batch
-        call so the embedding model (GPU or CPU) is fully utilised.
+        All section texts and reason texts are encoded in a single batch
+        call so the embedding model (GPU or CPU) is fully utilised. When
+        admission note sections are available (s.note_sections non-empty),
+        each section is embedded independently; otherwise the full note
+        is embedded as a fallback.
         """
-        # Flatten all texts into one list for a single encode_texts() call.
         all_texts: List[str] = []
-        note_indices: List[int] = []
+        # Per-case: list of section names in the order added to all_texts.
+        section_key_lists: List[List[str]] = []
+        section_slices: List[tuple] = []   # (start, end) index into all_texts
         reason_slices: List[tuple] = []
         per_case_reasons: List[List[str]] = []
 
         for s in states:
-            note_indices.append(len(all_texts))
-            all_texts.append(s.admission_note)
+            # Section or full-note texts
+            if s.note_sections:
+                sec_keys = list(s.note_sections.keys())
+                sec_texts = [s.note_sections[k] for k in sec_keys]
+            else:
+                sec_keys = ["_full"]
+                sec_texts = [s.admission_note]
+            section_key_lists.append(sec_keys)
+            sec_start = len(all_texts)
+            all_texts.extend(sec_texts)
+            section_slices.append((sec_start, sec_start + len(sec_texts)))
+
+            # Reason texts
             reasons = [d.reason for d in s.predictions[-1].diagnoses if d.reason.strip()]
             per_case_reasons.append(reasons)
-            start = len(all_texts)
+            r_start = len(all_texts)
             all_texts.extend(reasons)
-            reason_slices.append((start, start + len(reasons)))
+            reason_slices.append((r_start, r_start + len(reasons)))
 
         all_embeddings = encode_texts(all_texts) if all_texts else []
 
         out: List[RetrievalResult] = []
         for i, s in enumerate(states):
+            sec_start, sec_end = section_slices[i]
             r_start, r_end = reason_slices[i]
+            sec_embs: Dict[str, List[float]] = {
+                key: all_embeddings[sec_start + j]
+                for j, key in enumerate(section_key_lists[i])
+            }
             out.append(
                 self.retriever.retrieve(
                     admission_note=s.admission_note,
                     previous_predicted_codes=_three_digit_codes(s.predictions[-1]),
                     already_retrieved_ids=s.seen_instruction_ids,
                     previous_reasons=per_case_reasons[i],
-                    note_embedding=all_embeddings[note_indices[i]],
+                    note_sections=s.note_sections if s.note_sections else None,
+                    section_embeddings=sec_embs,
                     reason_embeddings=all_embeddings[r_start:r_end],
                 )
             )
@@ -432,7 +475,7 @@ class MERLINPipeline:
 
               (skipped N over budget)
         """
-        from src.merlin2.retriever import SEMANTIC, SEMANTIC_REASON, THRESHOLD_FPR, THRESHOLD_FNR
+        from src.merlin2.retriever import SEM_ICD, THRESHOLD_FPR, THRESHOLD_FNR, is_semantic_path
 
         true_str = ", ".join(sorted(ground_truth_codes)) if ground_truth_codes else "—"
         pred_codes = instruction_history[-1][0] if instruction_history else []
@@ -443,8 +486,9 @@ class MERLINPipeline:
 
         fnr_lines: List[str] = []
         fpr_lines: List[str] = []
-        sem_lines: List[str] = []
-        sem_reason_lines: List[str] = []
+        # Keyed by section path so each section prints as its own block.
+        sem_by_section: Dict[str, List[str]] = {}
+        sem_icd_lines: List[str] = []
 
         for instr in retrieval.instructions:
             ev = ev_by_id.get(instr.instruction_id)
@@ -459,13 +503,15 @@ class MERLINPipeline:
             elif ev.path == THRESHOLD_FPR:
                 fpr_lines.append(f"    {codes_tag:<6}  fpr={ev.trigger_value:.2f}")
 
-            elif ev.path == SEMANTIC:
+            elif ev.path == SEM_ICD:
                 snippet = (instr.instruction_text or "")[:70].replace("\n", " ")
-                sem_lines.append(f"    #{instr.instruction_id}  [{codes_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\"")
+                sem_icd_lines.append(f"    #{instr.instruction_id}  [{codes_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\"")
 
-            elif ev.path == SEMANTIC_REASON:
+            elif is_semantic_path(ev.path):
                 snippet = (instr.instruction_text or "")[:70].replace("\n", " ")
-                sem_reason_lines.append(f"    #{instr.instruction_id}  [{codes_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\"")
+                sem_by_section.setdefault(ev.path, []).append(
+                    f"    #{instr.instruction_id}  [{codes_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\""
+                )
 
         lines: List[str] = [
             f"[{hadm_id} | t={iteration} | true: {true_str}]",
@@ -479,12 +525,12 @@ class MERLINPipeline:
         if fpr_lines:
             lines.append("  FPR – rethink codes:")
             lines.extend(fpr_lines)
-        if sem_lines:
-            lines.append("  Semantic – similar to note:")
-            lines.extend(sem_lines)
-        if sem_reason_lines:
-            lines.append("  Semantic-reason – similar to reasoning:")
-            lines.extend(sem_reason_lines)
+        for section_path, entries in sem_by_section.items():
+            lines.append(f"  Semantic [{section_path}]:")
+            lines.extend(entries)
+        if sem_icd_lines:
+            lines.append("  Semantic [sem_icd] – similar to reasoning:")
+            lines.extend(sem_icd_lines)
         if not retrieval.instructions:
             lines.append("  (no instructions retrieved)")
         if retrieval.skipped_for_budget:

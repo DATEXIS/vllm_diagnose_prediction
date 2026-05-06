@@ -56,6 +56,15 @@ codes) write one entry of type RichErrorInstruction.
   separate per-code statistics table and are synthesised at retrieval
   time — do not emit them here.
 
+- `section` must be one of the known admission note section names:
+  CHIEF COMPLAINT, PRESENT ILLNESS, MEDICAL HISTORY,
+  MEDICATION ON ADMISSION, ALLERGIES, PHYSICAL EXAM,
+  FAMILY HISTORY, SOCIAL HISTORY.
+  Use `icd_reasoning` only when the instruction is grounded purely in
+  code-level reasoning (e.g. a contrastive swap between two similar
+  codes) with no specific section cue in the admission note. Do not
+  invent other section names.
+
 ### Output
 
 Return a JSON list of RichErrorInstruction objects. No prose outside the

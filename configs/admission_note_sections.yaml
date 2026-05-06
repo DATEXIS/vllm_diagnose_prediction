@@ -1,0 +1,16 @@
+sections:
+  - CHIEF COMPLAINT
+  - PRESENT ILLNESS
+  - MEDICAL HISTORY
+  - MEDICATION ON ADMISSION
+  - ALLERGIES
+  - PHYSICAL EXAM
+  - FAMILY HISTORY
+  - SOCIAL HISTORY
+
+ignore_phrases:
+  - "No Known Allergies / Adverse Drug Reactions"
+  - "None"
+  - "Not applicable"
+  - "N/A"
+  - "Unknown"
