@@ -82,12 +82,15 @@ def build_index(
     Encoder and builds an IndexFlatIP. Returns (faiss_index, list[str]).
     """
     if precomputed_config and precomputed_config.get("enabled"):
+        # chunks: null in config means all 38 chunks (full PubMed)
+        chunks = precomputed_config.get("chunks") or list(range(38))
         return _build_index_from_precomputed(
             precomputed_dir=precomputed_config["download_dir"],
             index_persist_dir=index_persist_dir,
-            chunks=precomputed_config.get("chunks", list(range(34, 38))),
+            chunks=chunks,
             nlist=precomputed_config.get("nlist", 4096),
-            nprobes=precomputed_config.get("nprobes", 64),
+            nprobes=precomputed_config.get("nprobes", 128),
+            flat_threshold=precomputed_config.get("flat_threshold", 20_000_000),
         )
 
     return _build_index_from_abstracts(abstracts_path, index_persist_dir, max_abstracts)
@@ -231,14 +234,18 @@ def _build_index_from_precomputed(
     index_persist_dir: str,
     chunks: list,
     nlist: int = 4096,
-    nprobes: int = 64,
+    nprobes: int = 128,
+    flat_threshold: int = 20_000_000,
 ):
     """
-    Builds (or loads) a FAISS IVFPQ index from NCBI pre-computed embeddings.
+    Builds (or loads) a FAISS index from NCBI pre-computed MedCPT embeddings.
 
-    IVFPQ compresses 768-dim float32 vectors to 96 bytes each, so even
-    4 M articles only need ~400 MB of RAM for the index at query time
-    (vs ~12 GB for IndexFlatIP).
+    Index type is chosen automatically based on total vector count:
+      ≤ flat_threshold  →  IndexFlatIP  (exact, best recall; needs ~4 GB RAM per 1 M vecs)
+      >  flat_threshold  →  IndexIVFPQ  (approximate, ~96 B/vec; ~3.5 GB for 37 M vecs)
+
+    Default flat_threshold = 20 M.  Note: IndexFlatIP for 20 M vecs needs ~61 GB RAM
+    in the client pod — raise memory_limit in experiment.yaml if you use FlatIP at scale.
 
     Returns (faiss_index, TextAccessor) — same interface as _build_index_from_abstracts.
     """
@@ -254,7 +261,8 @@ def _build_index_from_precomputed(
     if index_file.exists() and offsets_file.exists() and texts_file.exists():
         logger.info(f"Loading cached FAISS index from {index_persist_dir}")
         index = faiss.read_index(str(index_file))
-        index.nprobe = nprobes
+        if hasattr(index, "nprobe"):
+            index.nprobe = nprobes
         offsets = np.load(str(offsets_file))
         logger.info(f"Index loaded: {index.ntotal:,} vectors, dim={index.d}")
         return index, TextAccessor(str(texts_file), offsets)
@@ -263,27 +271,46 @@ def _build_index_from_precomputed(
     persist_path.mkdir(parents=True, exist_ok=True)
 
     # 1. Download missing chunk files
-    logger.info(f"Checking/downloading chunks {chunks} from NCBI FTP ...")
+    logger.info(f"Checking/downloading {len(chunks)} chunks from NCBI FTP ...")
     _download_chunks(precomputed_path, chunks)
 
-    # 2. Load first chunk as IVFPQ training sample
+    # 2. Count total vectors using memory-mapped reads (no data loaded into RAM)
+    logger.info("Counting total vectors across chunks ...")
     first_npy = precomputed_path / f"embeds_chunk_{chunks[0]}.npy"
-    logger.info(f"Loading training sample from {first_npy.name} ...")
-    training = np.load(str(first_npy)).astype(np.float32)
-    dim = training.shape[1]  # 768
-
-    # 3. Train IVFPQ index
-    quantizer = faiss.IndexFlatIP(dim)
-    index = faiss.IndexIVFPQ(
-        quantizer, dim, nlist, _IVFPQ_M, _IVFPQ_NBITS, faiss.METRIC_INNER_PRODUCT
+    first_arr = np.load(str(first_npy), mmap_mode="r")
+    dim = int(first_arr.shape[1])   # 768
+    total_vectors = sum(
+        np.load(str(precomputed_path / f"embeds_chunk_{c}.npy"), mmap_mode="r").shape[0]
+        for c in chunks
     )
-    logger.info(f"Training IVFPQ (nlist={nlist}) on {len(training):,} vectors ...")
-    index.train(training)
-    del training
+    logger.info(f"Total vectors: {total_vectors:,}  dim={dim}")
 
-    # 4. Stream all chunks: add embeddings + write texts file
+    # 3. Choose and (optionally) train the index
+    if total_vectors <= flat_threshold:
+        ram_gb = total_vectors * dim * 4 / 1e9
+        logger.info(
+            f"Using IndexFlatIP (exact search) — {total_vectors:,} vectors, "
+            f"~{ram_gb:.1f} GB RAM needed in client pod."
+        )
+        index = faiss.IndexFlatIP(dim)
+    else:
+        logger.info(
+            f"Using IndexIVFPQ — {total_vectors:,} vectors > threshold {flat_threshold:,}. "
+            f"RAM ~{total_vectors * _IVFPQ_M / 1e9:.1f} GB."
+        )
+        quantizer = faiss.IndexFlatIP(dim)
+        index = faiss.IndexIVFPQ(
+            quantizer, dim, nlist, _IVFPQ_M, _IVFPQ_NBITS, faiss.METRIC_INNER_PRODUCT
+        )
+        logger.info(f"Training IVFPQ (nlist={nlist}) on {first_arr.shape[0]:,} vectors ...")
+        index.train(first_arr.astype(np.float32))
+
+    del first_arr
+
+    # 4. Stream all chunks: add embeddings + write texts file with validation
     offsets: list = []
     byte_pos = 0
+    first_chunk = True
 
     with open(texts_file, "wb") as tf:
         for chunk_id in tqdm(chunks, desc="Indexing chunks"):
@@ -301,6 +328,25 @@ def _build_index_from_precomputed(
             with open(pmids_path, "r", encoding="utf-8") as pmf:
                 pmids = json.load(pmf)
 
+            # On first chunk: log a sample and check for empty texts
+            if first_chunk:
+                sample = pubmed_data.get(str(pmids[0]), {})
+                logger.info(f"  JSON keys in pubmed_chunk: {list(sample.keys())}")
+                logger.info(
+                    f"  Sample — t='{sample.get('t', '')[:80]}' "
+                    f"a='{sample.get('a', '')[:80]}'"
+                )
+                empty = sum(
+                    1 for p in pmids[:1000]
+                    if not pubmed_data.get(str(p), {}).get("a", "").strip()
+                )
+                if empty > 100:
+                    logger.warning(
+                        f"  {empty}/1000 sampled articles have empty abstracts — "
+                        "verify JSON key names ('a' for abstract, 't' for title)."
+                    )
+                first_chunk = False
+
             for pmid in pmids:
                 article  = pubmed_data.get(str(pmid), {})
                 title    = article.get("t", "").strip()
@@ -314,13 +360,16 @@ def _build_index_from_precomputed(
             del pubmed_data, pmids
 
     offsets_arr = np.array(offsets, dtype=np.int64)
-    index.nprobe = nprobes
+
+    if hasattr(index, "nprobe"):
+        index.nprobe = nprobes
 
     faiss.write_index(index, str(index_file))
     np.save(str(offsets_file), offsets_arr)
 
+    index_type = "IndexFlatIP" if total_vectors <= flat_threshold else "IndexIVFPQ"
     logger.info(
-        f"FAISS IVFPQ index saved: {index.ntotal:,} vectors, "
+        f"{index_type} index saved: {index.ntotal:,} vectors, "
         f"dim={index.d} → {index_persist_dir}"
     )
     return index, TextAccessor(str(texts_file), offsets_arr)

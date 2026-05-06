@@ -40,18 +40,20 @@ rag:
 
   # Pre-computed NCBI embeddings (recommended; disable classic mode above)
   precomputed_embeddings:
-    enabled: true          # set to true to use NCBI pre-computed MedCPT embeddings
-    download_dir: "data/pubmed/precomputed"   # where chunk files are stored on the PVC
-    chunks: [34, 35, 36, 37] # chunk IDs to use (0–37, ~1M articles each, ~3 GB/chunk)
-    nlist: 4096              # FAISS IVF clusters; training needs ≥ 39 × nlist vectors
-    nprobes: 64              # search-time probes (higher = better recall, slower query)
+    enabled: true            # set to true to use NCBI pre-computed MedCPT embeddings
+    download_dir: "data/pubmed/precomputed"
+    chunks: null             # null = all 38 chunks (~37M articles, full PubMed)
+    flat_threshold: 20000000 # ≤ this → IndexFlatIP (exact); > this → IndexIVFPQ
+                             # note: FlatIP for 20M vecs needs ~61 GB RAM in client pod
+    nlist: 4096              # IVFPQ: IVF clusters (only used when > flat_threshold)
+    nprobes: 128             # IVFPQ: probes at query time (higher = better recall)
 
   query_rewriting:
     enabled: true  # rewrite admission notes into focused medical queries before retrieval
-    n_queries: 3   # >1 generates diverse query variants covering different aspects of the note
+    n_queries: 1   # >1 generates diverse query variants covering different aspects of the note
   reranking:
     enabled: true  # re-rank retrieved candidates with MedCPT-Cross-Encoder before trimming to top_k
-    fetch_k: 20    # candidates to fetch per query before re-ranking (should be > top_k)
+    fetch_k: 30    # candidates to fetch per query before re-ranking (should be > top_k)
 
 # Kubernetes cluster configuration
 k8s:
