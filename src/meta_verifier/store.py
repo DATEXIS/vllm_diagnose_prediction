@@ -76,6 +76,7 @@ def _instruction_to_row(instr: Instruction) -> dict:
     return {
         "instruction_id": instr.instruction_id,
         "type": instr.type,
+        "section": instr.section,
         "instruction_text": instr.instruction_text,
         "description": instr.description,
         "target_codes": list(instr.target_codes),
@@ -108,6 +109,7 @@ def _row_to_instruction(row: pd.Series) -> Instruction:
     return Instruction(
         instruction_id=int(row["instruction_id"]),
         type=row["type"],
+        section=row.get("section", "") or "",
         instruction_text=row["instruction_text"],
         description=row.get("description", "") or "",
         target_codes=_safe_list(row.get("target_codes")),

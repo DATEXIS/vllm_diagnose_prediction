@@ -15,10 +15,15 @@ from unittest.mock import patch
 import pytest
 
 from src.merlin2.retriever import (
-    SEMANTIC,
+    SEM_ICD,
+    SEM_ILLNESS,
+    SEM_ALLERGIES,
+    SEM_COMPLAINT,
+    SEM_NOTE,
     THRESHOLD_FNR,
     THRESHOLD_FPR,
     Retriever,
+    is_semantic_path,
     synthetic_instruction_id,
 )
 from src.meta_verifier.code_stats import CodeStat
@@ -281,13 +286,13 @@ class TestSyntheticInstructionCaching:
 
 class TestSemanticPath:
     def test_semantic_match_above_threshold(self, patched_encoder):
-        # Note vector identical to the instruction embedding => cos = 1.0
+        # No sections → full-note fallback → path is SEM_NOTE
         patched_encoder.return_value = [1.0, 0.0]
         r = Retriever(sim_threshold=0.8)
         r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
         result = r.retrieve("note", previous_predicted_codes=None)
         assert [i.instruction_id for i in result.instructions] == [1]
-        assert result.events[0].path == SEMANTIC
+        assert result.events[0].path == SEM_NOTE
 
     def test_semantic_below_threshold_skipped(self, patched_encoder):
         patched_encoder.return_value = [1.0, 0.0]
@@ -295,6 +300,84 @@ class TestSemanticPath:
         r.load_instructions([_semantic(1, ["E11"], [0.0, 1.0])])  # cos = 0
         result = r.retrieve("note", previous_predicted_codes=None)
         assert result.instructions == []
+
+
+class TestSectionBasedSemanticPath:
+    """Section embeddings are passed directly; encode_single_text is not called."""
+
+    def test_matching_section_triggers_instruction(self):
+        # PRESENT ILLNESS section → path SEM_ILLNESS
+        r = Retriever(sim_threshold=0.8)
+        r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
+        result = r.retrieve(
+            "full note text",
+            previous_predicted_codes=None,
+            note_sections={"PRESENT ILLNESS": "DM with neuropathy"},
+            section_embeddings={"PRESENT ILLNESS": [1.0, 0.0]},
+        )
+        assert [i.instruction_id for i in result.instructions] == [1]
+        assert result.events[0].path == SEM_ILLNESS
+
+    def test_section_path_reflects_section_name(self):
+        # ALLERGIES section → path SEM_ALLERGIES when it matches.
+        r = Retriever(sim_threshold=0.8)
+        r.load_instructions([_semantic(1, ["Z88"], [1.0, 0.0])])
+        result = r.retrieve(
+            "full note text",
+            previous_predicted_codes=None,
+            note_sections={"ALLERGIES": "penicillin allergy"},
+            section_embeddings={"ALLERGIES": [1.0, 0.0]},
+        )
+        assert result.events[0].path == SEM_ALLERGIES
+
+    def test_non_matching_section_does_not_trigger(self):
+        # Section embedding [0,1] is orthogonal to instruction embedding [1,0].
+        r = Retriever(sim_threshold=0.8)
+        r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
+        result = r.retrieve(
+            "full note text",
+            previous_predicted_codes=None,
+            note_sections={"ALLERGIES": "NKDA"},
+            section_embeddings={"ALLERGIES": [0.0, 1.0]},
+        )
+        assert result.instructions == []
+
+    def test_first_matching_section_wins(self):
+        # Two sections both match; instruction must appear exactly once with
+        # the path of whichever section the dict iterates first.
+        r = Retriever(sim_threshold=0.8)
+        r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
+        sections = {"CHIEF COMPLAINT": "DM", "PRESENT ILLNESS": "DM neuropathy"}
+        result = r.retrieve(
+            "full note text",
+            previous_predicted_codes=None,
+            note_sections=sections,
+            section_embeddings={k: [1.0, 0.0] for k in sections},
+        )
+        assert len(result.instructions) == 1
+        assert result.instructions[0].instruction_id == 1
+        # Path belongs to whichever section triggered first (CHIEF COMPLAINT in insertion order)
+        assert result.events[0].path == SEM_COMPLAINT
+
+    def test_fallback_to_full_note_when_sections_empty(self, patched_encoder):
+        # When note_sections is None, falls back to encoding the full note → SEM_NOTE
+        patched_encoder.return_value = [1.0, 0.0]
+        r = Retriever(sim_threshold=0.8)
+        r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
+        result = r.retrieve(
+            "full note text",
+            previous_predicted_codes=None,
+            note_sections=None,
+        )
+        assert [i.instruction_id for i in result.instructions] == [1]
+        assert result.events[0].path == SEM_NOTE
+
+    def test_is_semantic_path_helper(self):
+        assert is_semantic_path(SEM_ILLNESS)
+        assert is_semantic_path(SEM_ICD)
+        assert is_semantic_path(SEM_NOTE)
+        assert not is_semantic_path(THRESHOLD_FPR)
+        assert not is_semantic_path(THRESHOLD_FNR)
 
 
 class TestDeduplication:

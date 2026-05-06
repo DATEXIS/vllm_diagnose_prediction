@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from src.meta_verifier.schemas import Instruction, InstructionType
+from src.meta_verifier.schemas import Instruction, InstructionType, RichErrorInstruction
 from src.prompter import ICDPrediction, ICDsModel
 
 
@@ -71,3 +71,61 @@ class TestInstruction:
         assert restored.instruction_id == 42
         assert restored.target_codes == ["E11", "I10"]
         assert restored.semantic_embedding == [0.5, 0.6]
+
+    def test_section_field_stored_and_loaded(self):
+        instr = Instruction(
+            instruction_id=7,
+            type=InstructionType.SEMANTIC,
+            instruction_text="text",
+            section="PHYSICAL EXAM",
+            semantic_embedding=[0.1],
+        )
+        restored = Instruction.model_validate_json(instr.model_dump_json())
+        assert restored.section == "PHYSICAL EXAM"
+
+    def test_section_defaults_to_empty_string(self):
+        instr = Instruction(
+            instruction_id=8,
+            type=InstructionType.SEMANTIC,
+            instruction_text="text",
+        )
+        assert instr.section == ""
+
+    def test_icd_reasoning_section_accepted(self):
+        instr = Instruction(
+            instruction_id=9,
+            type=InstructionType.CONTRASTIVE_SWAP,
+            instruction_text="prefer E11.4 over E11.9",
+            section="icd_reasoning",
+        )
+        assert instr.section == "icd_reasoning"
+
+
+class TestRichErrorInstruction:
+    def test_valid_with_section(self):
+        item = RichErrorInstruction(
+            type="semantic",
+            section="PRESENT ILLNESS",
+            description="Diabetic neuropathy cue.",
+            instruction_text="Prefer E11.4 if neuropathy is documented.",
+            related_icd_codes=["E11"],
+        )
+        assert item.section == "PRESENT ILLNESS"
+
+    def test_icd_reasoning_section_accepted(self):
+        item = RichErrorInstruction(
+            type="contrastive_swap",
+            section="icd_reasoning",
+            description="Similar codes for sepsis.",
+            instruction_text="Use A41.9 not A40.9 for unspecified sepsis.",
+            related_icd_codes=["A41"],
+        )
+        assert item.section == "icd_reasoning"
+
+    def test_missing_section_raises(self):
+        with pytest.raises(ValidationError):
+            RichErrorInstruction(
+                type="semantic",
+                description="some description",
+                instruction_text="some text",
+            )

@@ -46,6 +46,7 @@ META_VERIFIER_JSON_EXAMPLE = json.dumps(
     [
         {
             "type": "contrastive_swap",
+            "section": "PRESENT ILLNESS",
             "description": "Mention of diabetic neuropathy without explicit DKA cues.",
             "instruction_text": (
                 "If the note mentions diabetic neuropathy, prefer E11.4 over the "

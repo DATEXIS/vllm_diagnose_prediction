@@ -35,6 +35,13 @@ class RichErrorInstruction(BaseModel):
     type: str = Field(
         description="One of InstructionType values; defaults to SEMANTIC if the LLM does not classify."
     )
+    section: str = Field(
+        description=(
+            "The admission note section this instruction is grounded in "
+            "(e.g. 'CHIEF COMPLAINT', 'MEDICAL HISTORY', 'PHYSICAL EXAM') "
+            "or 'icd_reasoning' when grounded in code-level reasoning only."
+        )
+    )
     description: str = Field(
         description="Short note-grounded text used as the embedding target for semantic retrieval."
     )
@@ -64,6 +71,9 @@ class Instruction(BaseModel):
     instruction_id: int
 
     type: str = InstructionType.SEMANTIC
+    # Admission note section this instruction is grounded in, or "icd_reasoning".
+    # Empty string for legacy rows loaded from parquet (backward compat).
+    section: str = ""
     instruction_text: str
     description: str = ""
 
