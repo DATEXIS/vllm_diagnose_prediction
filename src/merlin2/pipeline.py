@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from src.data.evaluate import normalize_icd
 from src.merlin2.generator import Generator, GenerateRequest, GenerateResult
 from src.merlin2.retriever import RetrievalEvent, RetrievalResult, Retriever
+from src.utils.embeddings import encode_texts
 from src.merlin2.verifier import HaltReason, Verifier
 from src.meta_verifier.schemas import Instruction, InstructionType
 from src.prompter import ICDsModel
@@ -44,6 +45,10 @@ class CaseState:
     think_blocks: List[str] = field(default_factory=list)
     retrieval_events: List[List[RetrievalEvent]] = field(default_factory=list)
     instruction_ids_used: List[List[int]] = field(default_factory=list)
+    # Instruction objects as returned at retrieval time — stored so carry-over
+    # can reproduce the exact text the model saw rather than re-deriving it
+    # from the shared (mutable) retriever cache.
+    instructions_used: List[List[Instruction]] = field(default_factory=list)
     iteration_f1: List[float] = field(default_factory=list)
 
     cumulative_think_tokens: int = 0
@@ -137,6 +142,7 @@ class MERLINPipeline:
             fpr_threshold=merlin2_cfg.get("fpr_threshold", 0.5),
             fnr_threshold=merlin2_cfg.get("fnr_threshold", 0.5),
             max_tokens_budget=merlin2_cfg.get("max_tokens_budget", 2500),
+            per_iteration_token_budget=merlin2_cfg.get("per_iteration_token_budget"),
             threshold_budget_fraction=merlin2_cfg.get("threshold_budget_fraction", 0.5),
             cooccurrence_index=cooccurrence_index,
             code_stats=code_stats,
@@ -246,15 +252,39 @@ class MERLINPipeline:
     # ------------------------------------------------------ pre-fetch
     def _prefetch_retrieval(self, states: List[CaseState]) -> List[RetrievalResult]:
         """Run the Retriever for all live cases (used at t>=1 to detect
-        zero-new-instructions before paying for a generator call)."""
-        out: List[RetrievalResult] = []
+        zero-new-instructions before paying for a generator call).
+
+        All admission notes and reason texts are encoded in a single batch
+        call so the embedding model (GPU or CPU) is fully utilised.
+        """
+        # Flatten all texts into one list for a single encode_texts() call.
+        all_texts: List[str] = []
+        note_indices: List[int] = []
+        reason_slices: List[tuple] = []
+        per_case_reasons: List[List[str]] = []
+
         for s in states:
-            prev_codes = _three_digit_codes(s.predictions[-1])
+            note_indices.append(len(all_texts))
+            all_texts.append(s.admission_note)
+            reasons = [d.reason for d in s.predictions[-1].diagnoses if d.reason.strip()]
+            per_case_reasons.append(reasons)
+            start = len(all_texts)
+            all_texts.extend(reasons)
+            reason_slices.append((start, start + len(reasons)))
+
+        all_embeddings = encode_texts(all_texts) if all_texts else []
+
+        out: List[RetrievalResult] = []
+        for i, s in enumerate(states):
+            r_start, r_end = reason_slices[i]
             out.append(
                 self.retriever.retrieve(
                     admission_note=s.admission_note,
-                    previous_predicted_codes=prev_codes,
+                    previous_predicted_codes=_three_digit_codes(s.predictions[-1]),
                     already_retrieved_ids=s.seen_instruction_ids,
+                    previous_reasons=per_case_reasons[i],
+                    note_embedding=all_embeddings[note_indices[i]],
+                    reason_embeddings=all_embeddings[r_start:r_end],
                 )
             )
         return out
@@ -274,33 +304,56 @@ class MERLINPipeline:
         else:
             per_case_retrieval = self._prefetch_retrieval(states)
 
-        # 2) carry-over: instructions used in earlier iterations stay in the prompt
-        carryover_per_case: List[List[Instruction]] = []
-        for s in states:
-            carry = [
-                instr
-                for prev_ids in s.instruction_ids_used
-                for instr in self._lookup_instructions(prev_ids)
-            ]
-            carryover_per_case.append(carry)
+        # 2) build per-iteration instruction history for each case.
+        #
+        # Each history entry is (predicted_codes_at_t, instructions_retrieved_AFTER_t).
+        # The think block reads: "I predicted X, then considered these instructions."
+        #
+        # s.instructions_used[t] = instructions shown TO the model at iteration t,
+        # which were retrieved based on the prediction from t-1:
+        #   s.instructions_used[0] = []        (zero-shot, nothing shown)
+        #   s.instructions_used[1] = retrieved based on pred_0, shown at t=1
+        #   s.instructions_used[2] = retrieved based on pred_1, shown at t=2
+        #
+        # So the correct pairing is predictions[t] with instructions_used[t+1].
+        # The previous code paired predictions[t] with instructions_used[t], which
+        # produced two bugs: (a) a useless first entry (pred_0, []) and (b) the
+        # last two entries both showing the same prediction codes.
+        #
+        # Carry-over entries use `s.instructions_used` — the instruction objects
+        # captured at retrieval time — rather than re-deriving them from the
+        # shared retriever cache. The cache may have been mutated by another
+        # case in the same batch (FN warning text is case-specific), so reading
+        # from the cache would show the wrong trigger codes for carry-over.
+        instruction_histories: List[List[Tuple[List[str], List[Instruction]]]] = []
+        for s, retrieval in zip(states, per_case_retrieval):
+            history: List[Tuple[List[str], List[Instruction]]] = []
+            # Carry-over: pair prediction[t] with instructions shown at t+1
+            # (those instructions were retrieved based on prediction[t]).
+            # Skip index 0: instructions_used[0] is always [] (zero-shot).
+            for t in range(len(s.instructions_used) - 1):
+                pred_codes = _three_digit_codes(s.predictions[t])
+                history.append((pred_codes, s.instructions_used[t + 1]))
+            # New entry: latest prediction + freshly retrieved instructions
+            if s.predictions:
+                history.append((_three_digit_codes(s.predictions[-1]), retrieval.instructions))
+            instruction_histories.append(history)
 
         # 3) build generate requests
         requests: List[GenerateRequest] = []
-        for s, retrieval, carry in zip(states, per_case_retrieval, carryover_per_case):
-            prev_codes = _three_digit_codes(s.predictions[-1]) if s.predictions else []
+        for s, history in zip(states, instruction_histories):
             requests.append(
                 GenerateRequest(
                     admission_note=s.admission_note,
-                    instructions=carry + retrieval.instructions,
-                    previous_predicted_codes=prev_codes,
+                    instruction_history=history,
                 )
             )
 
         if logger.isEnabledFor(logging.DEBUG):
-            for s, retrieval, carry, req in zip(
-                states, per_case_retrieval, carryover_per_case, requests
-            ):
-                self._log_wave_inputs(s.hadm_id, iteration, req.previous_predicted_codes, carry, retrieval)
+            for s, retrieval, history in zip(states, per_case_retrieval, instruction_histories):
+                self._log_wave_inputs(
+                    s.hadm_id, iteration, history, retrieval, s.ground_truth_codes
+                )
 
         # 4) one batched LLM call
         results: List[GenerateResult] = await self.generator.generate_batch(requests)
@@ -314,6 +367,7 @@ class MERLINPipeline:
             s.retrieval_events.append(retrieval.events)
             new_ids = [ev.instruction_id for ev in retrieval.events]
             s.instruction_ids_used.append(new_ids)
+            s.instructions_used.append(list(retrieval.instructions))  # snapshot at retrieval time
             s.seen_instruction_ids.update(new_ids)
             tokens = sum(self.retriever._estimate_tokens(i) for i in retrieval.instructions)
             s.cumulative_think_tokens += tokens
@@ -352,45 +406,91 @@ class MERLINPipeline:
     def _log_wave_inputs(
         hadm_id: str,
         iteration: int,
-        prev_codes: List[str],
-        carry: List[Instruction],
+        instruction_history: "List[Tuple[List[str], List[Instruction]]]",
         retrieval: "RetrievalResult",
+        ground_truth_codes: Optional[List[str]] = None,
     ) -> None:
-        """Log one DEBUG line per case showing iteration context and instructions."""
-        from src.merlin2.retriever import SEMANTIC, THRESHOLD_FPR, THRESHOLD_FNR
+        """Structured DEBUG log per case per wave.
 
-        prev_str = "[" + ", ".join(prev_codes) + "]" if prev_codes else "[]"
+        Format:
+            [hadm_id | t=N | true: A, B, C]
+              Pred:   X, Y, Z
+              carry:  N from prior iterations
 
-        instr_parts: List[str] = []
+              FNR – missed codes:
+                M33  fnr=1.00  co-occurs-with: Z82, K86
+                N70  fnr=1.00  co-occurs-with: N18
+
+              FPR – rethink codes:
+                B18  fpr=1.00
+
+              Semantic – similar to note:
+                #42  [E11]  sim=0.85  "If the note mentions long-standing..."
+
+              Semantic-reason – similar to reasoning:
+                #81  [N18]  sim=0.83  "When CKD is mentioned alongside..."
+
+              (skipped N over budget)
+        """
+        from src.merlin2.retriever import SEMANTIC, SEMANTIC_REASON, THRESHOLD_FPR, THRESHOLD_FNR
+
+        true_str = ", ".join(sorted(ground_truth_codes)) if ground_truth_codes else "—"
+        pred_codes = instruction_history[-1][0] if instruction_history else []
+        pred_str = ", ".join(pred_codes) if pred_codes else "(none)"
+        carry_count = sum(len(instrs) for _, instrs in instruction_history[:-1]) if instruction_history else 0
+
         ev_by_id = {ev.instruction_id: ev for ev in retrieval.events}
+
+        fnr_lines: List[str] = []
+        fpr_lines: List[str] = []
+        sem_lines: List[str] = []
+        sem_reason_lines: List[str] = []
+
         for instr in retrieval.instructions:
             ev = ev_by_id.get(instr.instruction_id)
             if ev is None:
-                path_tag = "?"
-            elif ev.path == SEMANTIC:
-                path_tag = f"sem({ev.trigger_value:.2f})"
+                continue
+            codes_tag = ", ".join(ev.target_codes) if ev.target_codes else "?"
+
+            if ev.path == THRESHOLD_FNR:
+                cooccur = f"  co-occurs-with: {', '.join(sorted(ev.trigger_codes))}" if ev.trigger_codes else ""
+                fnr_lines.append(f"    {codes_tag:<6}  fnr={ev.trigger_value:.2f}{cooccur}")
+
             elif ev.path == THRESHOLD_FPR:
-                path_tag = f"fpr({ev.trigger_value:.2f})"
-            elif ev.path == THRESHOLD_FNR:
-                path_tag = f"fnr({ev.trigger_value:.2f})"
-            else:
-                path_tag = ev.path
-            snippet = (instr.instruction_text or "")[:60].replace("\n", " ")
-            instr_parts.append(f"#{instr.instruction_id} {path_tag} \"{snippet}\"")
+                fpr_lines.append(f"    {codes_tag:<6}  fpr={ev.trigger_value:.2f}")
 
-        new_str = (
-            f"new[{len(retrieval.instructions)}]: " + " | ".join(instr_parts)
-            if retrieval.instructions else "new[0]"
-        )
-        skipped_str = (
-            f" (skipped {retrieval.skipped_for_budget} over budget)"
-            if retrieval.skipped_for_budget else ""
-        )
+            elif ev.path == SEMANTIC:
+                snippet = (instr.instruction_text or "")[:70].replace("\n", " ")
+                sem_lines.append(f"    #{instr.instruction_id}  [{codes_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\"")
 
-        logger.debug(
-            "[WAVE t=%d] %s | prev=%s | carry=%d | %s%s",
-            iteration, hadm_id, prev_str, len(carry), new_str, skipped_str,
-        )
+            elif ev.path == SEMANTIC_REASON:
+                snippet = (instr.instruction_text or "")[:70].replace("\n", " ")
+                sem_reason_lines.append(f"    #{instr.instruction_id}  [{codes_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\"")
+
+        lines: List[str] = [
+            f"[{hadm_id} | t={iteration} | true: {true_str}]",
+            f"  Pred:   {pred_str}",
+            f"  carry:  {carry_count} from prior iterations",
+        ]
+
+        if fnr_lines:
+            lines.append("  FNR – missed codes:")
+            lines.extend(fnr_lines)
+        if fpr_lines:
+            lines.append("  FPR – rethink codes:")
+            lines.extend(fpr_lines)
+        if sem_lines:
+            lines.append("  Semantic – similar to note:")
+            lines.extend(sem_lines)
+        if sem_reason_lines:
+            lines.append("  Semantic-reason – similar to reasoning:")
+            lines.extend(sem_reason_lines)
+        if not retrieval.instructions:
+            lines.append("  (no instructions retrieved)")
+        if retrieval.skipped_for_budget:
+            lines.append(f"  ({retrieval.skipped_for_budget} skipped over budget)")
+
+        logger.debug("\n".join(lines))
 
     # ----------------------------------------------------------- finalize
     def _finalize(self, s: CaseState) -> PipelineCaseResult:

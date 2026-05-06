@@ -1,10 +1,20 @@
 """MERLIN 2 Hybrid-Retriever.
 
-Two retrieval paths, OR'd together:
+Three retrieval paths, OR'd together:
 
-  * Semantic path  — embed the admission note, retrieve instructions
-                     from the persistent store whose `description`
-                     embedding has cosine similarity >= sim_threshold.
+  * Semantic path        — embed the admission note, retrieve instructions
+                           from the persistent store whose `description`
+                           embedding has cosine similarity >= sim_threshold.
+
+  * Semantic-reason path — embed each reason text from the previous
+                           iteration's prediction and query the same
+                           instruction store.  Fires at t>=1 only.
+                           Rationale: the model's reasoning can (a) contain
+                           false clinical statements that a targeted
+                           instruction can correct, and (b) surface cues for
+                           ICD codes that the admission note alone wouldn't
+                           retrieve.  Treated identically to the semantic
+                           path for budget accounting and efficacy scoring.
 
   * Threshold path — synthesised at runtime from the per-code stats
                      table (no persistent Instruction rows). Inactive at
@@ -44,13 +54,14 @@ import numpy as np
 
 from src.meta_verifier.code_stats import CodeStat, CodeStatsIndex
 from src.meta_verifier.schemas import Instruction, InstructionType
-from src.utils.cooccurrence import CooccurrenceIndex, expand_cooccurring
+from src.utils.cooccurrence import CooccurrenceIndex, expand_cooccurring_with_parents
 from src.utils.embeddings import encode_single_text
 
 logger = logging.getLogger(__name__)
 
 
 SEMANTIC = "semantic"
+SEMANTIC_REASON = "semantic_reason"
 THRESHOLD_FPR = "threshold_fpr"
 THRESHOLD_FNR = "threshold_fnr"
 
@@ -67,8 +78,18 @@ def synthetic_instruction_id(kind: str, code: str) -> int:
     return int(h, 16) | (1 << 31)
 
 
-def _build_threshold_text(kind: str, code: str, stat: CodeStat) -> str:
-    """Render the warning text injected into the Generator's <think> block."""
+def _build_threshold_text(
+    kind: str,
+    code: str,
+    stat: CodeStat,
+    trigger_codes: Optional[List[str]] = None,
+) -> str:
+    """Render the warning text injected into the Generator's <think> block.
+
+    For FN warnings, `trigger_codes` is the list of predicted codes whose
+    co-occurrence with `code` caused this warning to fire.  Naming them lets
+    the model understand *why* the warning is relevant to this case.
+    """
     if kind == "fp":
         return (
             f"You predicted {code}, but {code} has historical FPR "
@@ -76,10 +97,16 @@ def _build_threshold_text(kind: str, code: str, stat: CodeStat) -> str:
             f"admission note actually supports this code; demote if cues are weak."
         )
     if kind == "fn":
+        cooccur_clause = ""
+        if trigger_codes:
+            codes_str = ", ".join(sorted(trigger_codes))
+            cooccur_clause = (
+                f" It frequently co-occurs with {codes_str} (which you predicted)."
+            )
         return (
             f"Code {code} is missed in {stat.fnr:.0%} of cases where it should "
-            f"have been assigned (n={stat.support_true}). Look for cues "
-            f"consistent with {code} in the admission note before finalizing."
+            f"have been assigned (n={stat.support_true}).{cooccur_clause} "
+            f"Look for cues consistent with {code} in the admission note before finalizing."
         )
     raise ValueError(f"Unknown threshold-warning kind: {kind!r}")
 
@@ -88,9 +115,11 @@ def _build_threshold_text(kind: str, code: str, stat: CodeStat) -> str:
 class RetrievalEvent:
     """A single retrieval hit, recorded for later threshold tuning."""
     instruction_id: int
-    path: str                # SEMANTIC | THRESHOLD_FPR | THRESHOLD_FNR
-    trigger_value: float     # cosine score, or fpr/fnr_at_creation
+    path: str                      # SEMANTIC | SEMANTIC_REASON | THRESHOLD_FPR | THRESHOLD_FNR
+    trigger_value: float           # cosine score, or fpr/fnr value
     efficacy_score: float
+    target_codes: List[str] = field(default_factory=list)   # codes this instruction targets
+    trigger_codes: List[str] = field(default_factory=list)  # FNR only: predicted codes that fired this
 
 
 @dataclass
@@ -109,6 +138,7 @@ class Retriever:
         fpr_threshold: float = 0.5,
         fnr_threshold: float = 0.5,
         max_tokens_budget: int = 2500,
+        per_iteration_token_budget: Optional[int] = None,
         threshold_budget_fraction: float = 0.5,
         cooccurrence_index: Optional[CooccurrenceIndex] = None,
         code_stats: Optional[CodeStatsIndex] = None,
@@ -117,6 +147,16 @@ class Retriever:
         self.fpr_threshold = fpr_threshold
         self.fnr_threshold = fnr_threshold
         self.max_tokens_budget = max_tokens_budget
+        # Per-call token cap for a single retrieve() call.  Falls back to
+        # max_tokens_budget when not set (backward compat).  Setting this
+        # below max_tokens_budget lets each iteration retrieve a modest
+        # instruction set while still allowing more total iterations before
+        # the Verifier's cumulative budget (max_tokens_budget) is exhausted.
+        self._per_iteration_budget: int = (
+            per_iteration_token_budget
+            if per_iteration_token_budget is not None
+            else max_tokens_budget
+        )
         self.threshold_budget_fraction = threshold_budget_fraction
         # Cooccurrence index: {predicted_code -> [(other_code, lift), ...]}.
         # Threshold + top-K already applied at load time. An empty dict
@@ -198,6 +238,9 @@ class Retriever:
         admission_note: str,
         previous_predicted_codes: Optional[List[str]],
         already_retrieved_ids: Optional[Set[int]] = None,
+        previous_reasons: Optional[List[str]] = None,
+        note_embedding: Optional[List[float]] = None,
+        reason_embeddings: Optional[List[List[float]]] = None,
     ) -> RetrievalResult:
         """Retrieve instructions for one case at one iteration.
 
@@ -208,6 +251,17 @@ class Retriever:
                 (this is the t=0 case).
             already_retrieved_ids: instructions already used in earlier
                 iterations of this same case; they are suppressed.
+            previous_reasons: reason texts from the previous iteration's
+                prediction (one string per predicted code). Each is embedded
+                independently and queried against the instruction store via
+                the semantic-reason path. None or [] -> path is inactive
+                (always the case at t=0 when there is no prior prediction).
+            note_embedding: pre-computed embedding for admission_note. When
+                provided, skips the encode_single_text() call for the semantic
+                path (used by _prefetch_retrieval for batch encoding).
+            reason_embeddings: pre-computed embeddings for each entry in
+                previous_reasons, in the same order. When provided, skips
+                per-reason encode_single_text() calls.
 
         Returns:
             A RetrievalResult containing the (deduped, budget-capped)
@@ -224,7 +278,8 @@ class Retriever:
 
         # Semantic path
         if self._emb_matrix is not None and self._emb_matrix.size > 0:
-            note_emb = np.asarray(encode_single_text(admission_note), dtype=np.float32)
+            raw = note_embedding if note_embedding is not None else encode_single_text(admission_note)
+            note_emb = np.asarray(raw, dtype=np.float32)
             note_norm = float(np.linalg.norm(note_emb))
             if note_norm > 0:
                 # cosine sims to all stored instructions with embeddings
@@ -244,6 +299,47 @@ class Retriever:
                         path=SEMANTIC,
                         trigger_value=float(sims[h]),
                         efficacy_score=instr.efficacy_score,
+                        target_codes=list(instr.target_codes),
+                    )
+
+        # Semantic-reason path (only for t>=1 when previous_reasons is non-empty).
+        # Each reason text is embedded independently; the highest cosine similarity
+        # across all reason texts wins for a given instruction.  Instructions
+        # already triggered via the admission-note semantic path are NOT
+        # overwritten — we keep the higher-confidence admission-note hit.
+        if previous_reasons and self._emb_matrix is not None and self._emb_matrix.size > 0:
+            for idx, reason_text in enumerate(previous_reasons):
+                if not reason_text.strip():
+                    continue
+                raw = (
+                    reason_embeddings[idx]
+                    if reason_embeddings is not None and idx < len(reason_embeddings)
+                    else encode_single_text(reason_text)
+                )
+                reason_emb = np.asarray(raw, dtype=np.float32)
+                reason_norm = float(np.linalg.norm(reason_emb))
+                if reason_norm == 0:
+                    continue
+                dots = self._emb_matrix @ reason_emb
+                denom = self._emb_norms * reason_norm
+                with np.errstate(invalid="ignore", divide="ignore"):
+                    sims = np.where(denom > 0, dots / denom, 0.0)
+                hits = np.where(sims >= self.sim_threshold)[0]
+                for h in hits:
+                    instr_idx = self._emb_indices[int(h)]
+                    instr = self._instructions[instr_idx]
+                    if instr.instruction_id in already_retrieved_ids:
+                        continue
+                    if instr.instruction_id in triggered:
+                        # admission-note semantic path already claimed this
+                        # instruction — leave it as-is.
+                        continue
+                    triggered[instr.instruction_id] = RetrievalEvent(
+                        instruction_id=instr.instruction_id,
+                        path=SEMANTIC_REASON,
+                        trigger_value=float(sims[h]),
+                        efficacy_score=instr.efficacy_score,
+                        target_codes=list(instr.target_codes),
                     )
 
         # Threshold path (only for t>=1). Synthesised at runtime from
@@ -252,7 +348,8 @@ class Retriever:
         #   FN gate: code in cooccurring_set with code_stats[code].fnr >= thr
         if previous_predicted_codes and self._code_stats:
             predicted_set = set(previous_predicted_codes)
-            cooccurring_set = expand_cooccurring(
+            # parents_map: {cooccurring_code -> [predicted codes that triggered it]}
+            parents_map = expand_cooccurring_with_parents(
                 self._cooccurrence_index, list(predicted_set)
             )
 
@@ -271,14 +368,16 @@ class Retriever:
                     path=THRESHOLD_FPR,
                     trigger_value=stat.fpr,
                     efficacy_score=0.0,
+                    target_codes=[code],
                 )
 
-            # FN gate
-            for code in cooccurring_set:
+            # FN gate — trigger_codes tells the model which predicted codes
+            # co-occur with the warned code, giving it retrieval context.
+            for code, trigger_codes in parents_map.items():
                 stat = self._code_stats.get(code)
                 if stat is None or stat.fnr is None or stat.fnr < self.fnr_threshold:
                     continue
-                instr = self._get_or_create_synthetic("fn", code, stat)
+                instr = self._get_or_create_synthetic("fn", code, stat, trigger_codes)
                 if instr.instruction_id in already_retrieved_ids:
                     continue
                 if instr.instruction_id in triggered:
@@ -288,6 +387,8 @@ class Retriever:
                     path=THRESHOLD_FNR,
                     trigger_value=stat.fnr,
                     efficacy_score=0.0,
+                    target_codes=[code],
+                    trigger_codes=list(trigger_codes),
                 )
 
         # ---- prioritize and apply split token budget -------------------
@@ -313,7 +414,7 @@ class Retriever:
             key=lambda ev: (-ev.trigger_value, ev.instruction_id),
         )
         semantic_events = sorted(
-            [ev for ev in triggered.values() if ev.path == SEMANTIC],
+            [ev for ev in triggered.values() if ev.path in (SEMANTIC, SEMANTIC_REASON)],
             key=lambda ev: (-ev.efficacy_score, ev.instruction_id),
         )
 
@@ -322,8 +423,10 @@ class Retriever:
         total_tokens = 0
         skipped = 0
 
-        # Fill threshold slot first
-        threshold_cap = int(self.max_tokens_budget * self.threshold_budget_fraction)
+        # Fill threshold slot first.
+        # Both caps use _per_iteration_budget (the per-call limit), not the
+        # cumulative max_tokens_budget that the Verifier checks separately.
+        threshold_cap = int(self._per_iteration_budget * self.threshold_budget_fraction)
         threshold_tokens = 0
         for ev in threshold_events:
             instr = id_to_instr[ev.instruction_id]
@@ -340,7 +443,7 @@ class Retriever:
         for ev in semantic_events:
             instr = id_to_instr[ev.instruction_id]
             est = self._estimate_tokens(instr)
-            if total_tokens + est > self.max_tokens_budget:
+            if total_tokens + est > self._per_iteration_budget:
                 skipped += 1
                 continue
             selected_instructions.append(instr)
@@ -352,7 +455,7 @@ class Retriever:
                 "Budget cap hit: %d instruction(s) skipped "
                 "(threshold_used=%d/%d, total_used=%d/%d)",
                 skipped, threshold_tokens, threshold_cap,
-                total_tokens, self.max_tokens_budget,
+                total_tokens, self._per_iteration_budget,
             )
 
         return RetrievalResult(
@@ -363,26 +466,54 @@ class Retriever:
 
     # ----------------------------------------------- synthesised warnings
     def _get_or_create_synthetic(
-        self, kind: str, code: str, stat: CodeStat
+        self,
+        kind: str,
+        code: str,
+        stat: CodeStat,
+        trigger_codes: Optional[List[str]] = None,
     ) -> Instruction:
-        """Build (or fetch from cache) a runtime threshold-warning Instruction.
+        """Build a runtime threshold-warning Instruction.
 
-        Cached so the same instruction_id is reused across iterations of
-        the same case — critical for the dedup / carry-over machinery.
-        Synthesised instructions never carry an embedding (threshold-only)
-        and never accumulate efficacy (per design).
+        FP warnings (kind="fp") are cached and reused — their text is
+        stable (it depends only on the code and frozen stats).
+
+        FN warnings (kind="fn") are NEVER reused from cache.  A fresh
+        Instruction object is created on every call so that batch-concurrent
+        cases don't cross-contaminate each other's trigger-code text.  The
+        new object IS written to the cache so ID-based lookup (e.g. dedup
+        via `already_retrieved_ids`) still works — but the object returned
+        to the caller is always freshly constructed with the current
+        trigger_codes, not the stale one from a previous case.
+
+        The instruction_id is deterministic (`"fn_<code>"` md5 hash) and
+        stable across calls — that is what makes dedup correct.
         """
         instr_id = synthetic_instruction_id(kind, code)
-        cached = self._synthetic_cache.get(instr_id)
-        if cached is not None:
-            return cached
-        instr_type = (
-            InstructionType.FP_WARNING if kind == "fp" else InstructionType.FN_WARNING
-        )
+
+        if kind == "fp":
+            cached = self._synthetic_cache.get(instr_id)
+            if cached is not None:
+                return cached
+            instr = Instruction(
+                instruction_id=instr_id,
+                type=InstructionType.FP_WARNING,
+                instruction_text=_build_threshold_text(kind, code, stat),
+                description="",
+                target_codes=[code],
+                source_hadm_ids=[],
+                fpr_at_creation=stat.fpr,
+                fnr_at_creation=stat.fnr,
+                efficacy_score=0.0,
+                semantic_embedding=None,
+            )
+            self._synthetic_cache[instr_id] = instr
+            return instr
+
+        # kind == "fn": always build a fresh object with case-specific text.
         instr = Instruction(
             instruction_id=instr_id,
-            type=instr_type,
-            instruction_text=_build_threshold_text(kind, code, stat),
+            type=InstructionType.FN_WARNING,
+            instruction_text=_build_threshold_text(kind, code, stat, trigger_codes),
             description="",
             target_codes=[code],
             source_hadm_ids=[],
@@ -391,6 +522,9 @@ class Retriever:
             efficacy_score=0.0,
             semantic_embedding=None,
         )
+        # Update cache so the deterministic ID is findable for dedup.
+        # Carry-over uses CaseState.instructions_used (not this cache) so
+        # storing the latest case's version here is harmless.
         self._synthetic_cache[instr_id] = instr
         return instr
 
