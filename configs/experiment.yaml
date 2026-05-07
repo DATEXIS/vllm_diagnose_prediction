@@ -40,7 +40,7 @@ rag:
 
   # Pre-computed NCBI embeddings (recommended; disable classic mode above)
   precomputed_embeddings:
-    enabled: true            # set to true to use NCBI pre-computed MedCPT embeddings
+    enabled: true           # set to true to use NCBI pre-computed MedCPT embeddings
     download_dir: "data/pubmed/precomputed"
     chunks: null             # null = all 38 chunks (~37M articles, full PubMed)
     flat_threshold: 20000000 # ≤ this → IndexFlatIP (exact); > this → IndexIVFPQ

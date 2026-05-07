@@ -149,7 +149,7 @@ def log_sample_table(df: pd.DataFrame, predictions: List[str], metrics: dict, n_
 
             subject_id = row.get('subject_id', '')
             hadm_id = row.get('hadm_id', '')
-            admission_note = row.get('admission_note', '')[:500] if row.get('admission_note') else ''
+            admission_note = row.get('admission_note', '') if row.get('admission_note') else ''
             icd_codes = row.get(target_col, '')
             raw_chunks = row.get('retrieved_chunks', [])
             retrieved_chunks_str = "\n\n".join(raw_chunks) if isinstance(raw_chunks, list) else str(raw_chunks or '')
