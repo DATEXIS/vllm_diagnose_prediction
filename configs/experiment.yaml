@@ -2,7 +2,7 @@
 # Changed per experiment/run (no server rebuild required for most params)
 
 # Run identification
-job_name: "experiment-rewritten_queries"
+job_name: "experiment-queries"
 run_name: "qwen8b-guided-decoding"
 
 # Logging level

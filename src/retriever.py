@@ -417,10 +417,10 @@ async def _rewrite_one(
     """Returns a list of n_queries strings for one admission note."""
     if n_queries == 1:
         prompt = _SINGLE_QUERY_PROMPT.format(note=note[:3000])
-        max_tokens = 200
+        max_tokens = 300
     else:
         prompt = _MULTI_QUERY_PROMPT.format(n=n_queries, note=note[:3000])
-        max_tokens = 200 * n_queries
+        max_tokens = 300 * n_queries
 
     payload = {
         "model": model,
@@ -436,14 +436,28 @@ async def _rewrite_one(
     async with semaphore:
         try:
             async with session.post(url, json=payload, headers={"Content-Type": "application/json"}) as resp:
-                resp.raise_for_status()
+                if not resp.ok:
+                    body = await resp.text()
+                    logger.warning(
+                        f"Query rewriting HTTP {resp.status}: {body[:300]!r} — falling back to raw note"
+                    )
+                    return [note[:500]]
                 data = await resp.json()
                 content = data["choices"][0]["message"]["content"].strip()
+                logger.debug(f"Raw LLM output for query rewriting: {content[:300]!r}")
                 # Strip Qwen3-style thinking block if present.
                 if "</think>" in content:
-                    content = content.split("</think>", 1)[-1].strip()
+                    after_think = content.split("</think>", 1)[-1].strip()
+                    if not after_think:
+                        logger.warning(
+                            "Thinking block consumed all tokens — no content after </think>. "
+                            "Falling back to raw note. Consider increasing max_tokens or ensuring "
+                            "enable_thinking=False is respected by the server."
+                        )
+                        return [note[:500]]
+                    content = after_think
                 if n_queries == 1:
-                    return [content]
+                    return [content] if content else [note[:500]]
                 # Parse numbered list: "1. query", "2. query", ...
                 # Works even when the response is partially truncated.
                 queries = []
@@ -453,6 +467,10 @@ async def _rewrite_one(
                         queries.append(cleaned)
                 if queries:
                     return queries[:n_queries]
+                logger.warning(
+                    f"Query rewriting produced no parseable lines. LLM output was: {content[:300]!r}. "
+                    "Falling back to raw note."
+                )
                 return [note[:500]]
         except Exception as e:
             logger.warning(f"Query generation failed, falling back to raw note: {e}")
