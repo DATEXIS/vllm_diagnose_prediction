@@ -308,9 +308,12 @@ def _build_index_from_precomputed(
     del first_arr
 
     # 4. Stream all chunks: add embeddings + write texts file with validation
+    # Only articles with a non-empty abstract are added to both FAISS and
+    # texts.txt so that every retrieved chunk has meaningful content.
     offsets: list = []
     byte_pos = 0
     first_chunk = True
+    total_skipped = 0
 
     with open(texts_file, "wb") as tf:
         for chunk_id in tqdm(chunks, desc="Indexing chunks"):
@@ -318,17 +321,14 @@ def _build_index_from_precomputed(
             pubmed_path = precomputed_path / f"pubmed_chunk_{chunk_id}.json"
             pmids_path  = precomputed_path / f"pmids_chunk_{chunk_id}.json"
 
-            logger.info(f"  Adding chunk {chunk_id} to FAISS ...")
             embeddings = np.load(str(emb_path)).astype(np.float32)
-            index.add(embeddings)
-            del embeddings
 
             with open(pubmed_path, "r", encoding="utf-8") as pf:
                 pubmed_data = json.load(pf)
             with open(pmids_path, "r", encoding="utf-8") as pmf:
                 pmids = json.load(pmf)
 
-            # On first chunk: log a sample and check for empty texts
+            # On first chunk: log a sample so key names are visible in logs
             if first_chunk:
                 sample = pubmed_data.get(str(pmids[0]), {})
                 logger.info(f"  JSON keys in pubmed_chunk: {list(sample.keys())}")
@@ -336,20 +336,34 @@ def _build_index_from_precomputed(
                     f"  Sample — t='{sample.get('t', '')[:80]}' "
                     f"a='{sample.get('a', '')[:80]}'"
                 )
-                empty = sum(
-                    1 for p in pmids[:1000]
-                    if not pubmed_data.get(str(p), {}).get("a", "").strip()
-                )
-                if empty > 100:
-                    logger.warning(
-                        f"  {empty}/1000 sampled articles have empty abstracts — "
-                        "verify JSON key names ('a' for abstract, 't' for title)."
-                    )
                 first_chunk = False
 
+            # Filter: only index articles that have a non-empty abstract.
+            keep_mask = []
             for pmid in pmids:
                 article  = pubmed_data.get(str(pmid), {})
-                title    = article.get("t", "").strip()
+                abstract = article.get("a", "").strip()
+                keep_mask.append(bool(abstract))
+
+            kept    = sum(keep_mask)
+            skipped = len(pmids) - kept
+            total_skipped += skipped
+            logger.info(
+                f"  Chunk {chunk_id}: {kept:,} articles with abstracts, "
+                f"{skipped:,} skipped (no abstract)."
+            )
+
+            # Add only the kept embeddings to FAISS
+            keep_indices = np.array([i for i, k in enumerate(keep_mask) if k], dtype=np.int64)
+            if keep_indices.size:
+                index.add(embeddings[keep_indices])
+
+            # Write kept texts to texts.txt
+            for i, pmid in enumerate(pmids):
+                if not keep_mask[i]:
+                    continue
+                article  = pubmed_data.get(str(pmid), {})
+                title    = article.get("t", "").strip().rstrip(".")
                 abstract = article.get("a", "").strip()
                 text     = f"{title}. {abstract}" if title else abstract
                 encoded  = (text.replace("\n", " ") + "\n").encode("utf-8")
@@ -357,9 +371,15 @@ def _build_index_from_precomputed(
                 tf.write(encoded)
                 byte_pos += len(encoded)
 
-            del pubmed_data, pmids
+            del embeddings, pubmed_data, pmids
 
     offsets_arr = np.array(offsets, dtype=np.int64)
+
+    logger.info(
+        f"Indexing complete: {index.ntotal:,} articles with abstracts indexed "
+        f"({total_skipped:,} skipped — no abstract). "
+        f"texts.txt: {len(offsets_arr):,} lines."
+    )
 
     if hasattr(index, "nprobe"):
         index.nprobe = nprobes

@@ -50,7 +50,7 @@ rag:
 
   query_rewriting:
     enabled: true  # rewrite admission notes into focused medical queries before retrieval
-    n_queries: 1   # >1 generates diverse query variants covering different aspects of the note
+    n_queries: 3   # >1 generates diverse query variants covering different aspects of the note
   reranking:
     enabled: true  # re-rank retrieved candidates with MedCPT-Cross-Encoder before trimming to top_k
     fetch_k: 30    # candidates to fetch per query before re-ranking (should be > top_k)
