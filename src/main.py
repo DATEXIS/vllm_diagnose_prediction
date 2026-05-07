@@ -62,6 +62,12 @@ async def main_async(config: dict):
                 admission_notes=df['admission_note'].tolist(),
                 config=config,
             )
+            # Store as a readable column for W&B and CSV inspection
+            df['rewritten_queries'] = [
+                qs[0] if len(qs) == 1
+                else "\n".join(f"{i+1}. {q}" for i, q in enumerate(qs))
+                for qs in rewritten_queries
+            ]
 
         rerank_config = rag_config.get('reranking', {})
         df = retrieve_for_dataframe(

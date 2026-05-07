@@ -154,11 +154,14 @@ def log_sample_table(df: pd.DataFrame, predictions: List[str], metrics: dict, n_
             raw_chunks = row.get('retrieved_chunks', [])
             retrieved_chunks_str = "\n\n".join(raw_chunks) if isinstance(raw_chunks, list) else str(raw_chunks or '')
 
+            rewritten_queries = str(row.get('rewritten_queries', ''))
+
             table_data.append({
                 "subject_id": str(subject_id) if subject_id else "",
                 "hadm_id": str(hadm_id) if hadm_id else "",
                 "admission_note": admission_note,
                 "ICD_CODES": str(icd_codes),
+                "rewritten_queries": rewritten_queries[:1000],
                 "retrieved_chunks": retrieved_chunks_str[:2000],
                 "response": raw_response[:1000] if raw_response else "",
                 "json": str(parsed)[:1000] if parsed else "",
