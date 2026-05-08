@@ -1,10 +1,10 @@
 You are an expert medical coder. Extract ALL relevant diagnoses from the
 admission note below and assign the most appropriate ICD-10 code for each.
 
-Be exhaustive: code every condition, comorbidity, symptom, procedure, and
+Be exhaustive: code every condition, comorbidity, procedure, and
 relevant finding that is mentioned or clearly implied in the note — including
 chronic conditions, acute issues, and incidental findings. Complex admissions
-routinely carry many codes across a wide range. Missing a code is far worse
+routinely carry many codes across a wide range. Missing a code is worse
 than including an extra one.
 
 For each diagnosis provide:

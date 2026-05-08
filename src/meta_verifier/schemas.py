@@ -11,7 +11,7 @@ Meta-Verifier LLM to emit. It is converted into one or more
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -50,7 +50,14 @@ class RichErrorInstruction(BaseModel):
     )
     related_icd_codes: List[str] = Field(
         default_factory=list,
-        description="3-digit ICD codes this error pertains to.",
+        description="ICD codes this error pertains to (full codes; evaluated at 3-digit level).",
+    )
+    action: Literal["add", "remove"] = Field(
+        default="add",
+        description=(
+            "'add' if the instruction corrects a missed code (FN — include this code); "
+            "'remove' if the instruction corrects a hallucinated code (FP — drop this code)."
+        ),
     )
 
 
@@ -71,6 +78,13 @@ class Instruction(BaseModel):
     instruction_id: int
 
     type: str = InstructionType.SEMANTIC
+    # Whether this instruction recommends adding or removing its target codes.
+    # "add"    → FN correction: tell the Generator to include the code(s).
+    # "remove" → FP correction: tell the Generator to drop the code(s).
+    # Defaults to "add" for backward-compat with rows that pre-date this field.
+    # Synthesised threshold warnings (FP_WARNING / FN_WARNING) set this
+    # explicitly in the Retriever ("remove" / "add" respectively).
+    action: Literal["add", "remove"] = "add"
     # Admission note section this instruction is grounded in, or "icd_reasoning".
     # Empty string for legacy rows loaded from parquet (backward compat).
     section: str = ""

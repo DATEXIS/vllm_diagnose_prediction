@@ -46,14 +46,26 @@ META_VERIFIER_JSON_EXAMPLE = json.dumps(
     [
         {
             "type": "contrastive_swap",
+            "action": "add",
             "section": "PRESENT ILLNESS",
             "description": "Mention of diabetic neuropathy without explicit DKA cues.",
             "instruction_text": (
-                "If the note mentions diabetic neuropathy, prefer E11.4 over the "
+                "If the note mentions diabetic neuropathy, prefer E11.40 over the "
                 "unspecified E11.9."
             ),
-            "related_icd_codes": ["E11"],
-        }
+            "related_icd_codes": ["E11.40"],
+        },
+        {
+            "type": "semantic",
+            "action": "remove",
+            "section": "MEDICAL HISTORY",
+            "description": "Anxiety listed only as historical, resolved — not an active diagnosis.",
+            "instruction_text": (
+                "If anxiety appears only in the past medical history as resolved, "
+                "do not assign F41.1; reserve it for currently active anxiety disorders."
+            ),
+            "related_icd_codes": ["F41.1"],
+        },
     ],
     indent=2,
 )

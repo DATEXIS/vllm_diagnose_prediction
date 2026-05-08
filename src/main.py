@@ -179,6 +179,14 @@ async def main_async(config: dict) -> None:
 
     # ------------------------------------------------------------ Loop B
     mv_cfg = config.get("meta_verifier", {})
+    if mv_cfg.get("enabled", False):
+        if df_results is None:
+            logger.warning(
+                "Meta-Verifier is enabled but skipped: evaluation results are "
+                "unavailable (ground truth required). Check that '%s' column "
+                "exists in the data file.",
+                target_col,
+            )
     if mv_cfg.get("enabled", False) and df_results is not None:
         df_for_audit = df_results.copy()
         df_for_audit["pred_codes"] = df_for_audit["parsed_predictions"].apply(
@@ -345,13 +353,11 @@ def _format_retrieval_log(result: PipelineCaseResult) -> str:
         Rethink codes (FPR):
         * B18  fpr=1.00
 
-        Similar to note (semantic):
-        * [E11]  sim=0.85  "If the note mentions long-standing DM2..."
-
-        Similar to reasoning (semantic_reason):
-        * [N18]  sim=0.83  "When CKD is mentioned alongside..."
+        Semantic Similarity:
+        * [E11]  [note]  sim=0.85  "If the note mentions long-standing DM2..."
+        * [N18]  [icd]   sim=0.83  "When CKD is mentioned alongside..."
     """
-    from src.merlin2.retriever import SEMANTIC, SEMANTIC_REASON, THRESHOLD_FPR, THRESHOLD_FNR
+    from src.merlin2.retriever import THRESHOLD_FPR, THRESHOLD_FNR, is_semantic_path
 
     true_codes = result.history.ground_truth_codes or []
     true_str = ", ".join(sorted(true_codes)) if true_codes else "—"
@@ -377,7 +383,6 @@ def _format_retrieval_log(result: PipelineCaseResult) -> str:
         fnr_lines: List[str] = []
         fpr_lines: List[str] = []
         sem_lines: List[str] = []
-        sem_reason_lines: List[str] = []
 
         for instr in instrs:
             ev = ev_by_id.get(instr.instruction_id)
@@ -394,10 +399,9 @@ def _format_retrieval_log(result: PipelineCaseResult) -> str:
                 fnr_lines.append(f"* {codes_tag:<6}  fnr={ev.trigger_value:.2f}{cooccur}")
             elif ev.path == THRESHOLD_FPR:
                 fpr_lines.append(f"* {codes_tag:<6}  fpr={ev.trigger_value:.2f}")
-            elif ev.path == SEMANTIC:
-                sem_lines.append(f"* [{codes_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\"")
-            elif ev.path == SEMANTIC_REASON:
-                sem_reason_lines.append(f"* [{codes_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\"")
+            elif is_semantic_path(ev.path):
+                section_tag = ev.path.removeprefix("sem_")
+                sem_lines.append(f"* [{codes_tag}]  [{section_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\"")
 
         section: List[str] = [f"\nT={t}:", f"Pred: {pred_str}"]
         if fnr_lines:
@@ -407,11 +411,8 @@ def _format_retrieval_log(result: PipelineCaseResult) -> str:
             section.append("\nRethink codes (FPR):")
             section.extend(fpr_lines)
         if sem_lines:
-            section.append("\nSimilar to note (semantic):")
+            section.append("\nSemantic Similarity:")
             section.extend(sem_lines)
-        if sem_reason_lines:
-            section.append("\nSimilar to reasoning (semantic_reason):")
-            section.extend(sem_reason_lines)
         blocks.append("\n".join(section))
 
     return "\n".join(blocks) if len(blocks) > 1 else "(no retrievals)"

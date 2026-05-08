@@ -327,6 +327,13 @@ class Retriever:
         if self._emb_matrix is None:
             self._build_embedding_cache()
 
+        # Pre-compute the 3-digit predicted set once.  Used by the
+        # action-based saturation filter in the semantic path loops.
+        # Empty set at t=0 (previous_predicted_codes is None/[]).
+        predicted_set_3digit: frozenset[str] = frozenset(
+            previous_predicted_codes or []
+        )
+
         # ---- collect triggers per instruction (one event each) ---------
         triggered: dict[int, RetrievalEvent] = {}
 
@@ -370,6 +377,8 @@ class Retriever:
                     if instr.instruction_id in triggered:
                         # First section to trigger this instruction wins.
                         continue
+                    if self._is_saturated(instr, predicted_set_3digit):
+                        continue
                     triggered[instr.instruction_id] = RetrievalEvent(
                         instruction_id=instr.instruction_id,
                         path=section_to_path(section_name),
@@ -409,6 +418,8 @@ class Retriever:
                     if instr.instruction_id in triggered:
                         # admission-note semantic path already claimed this
                         # instruction — leave it as-is.
+                        continue
+                    if self._is_saturated(instr, predicted_set_3digit):
                         continue
                     triggered[instr.instruction_id] = RetrievalEvent(
                         instruction_id=instr.instruction_id,
@@ -603,6 +614,42 @@ class Retriever:
         # storing the latest case's version here is harmless.
         self._synthetic_cache[instr_id] = instr
         return instr
+
+    @staticmethod
+    def _is_saturated(
+        instr: Instruction,
+        predicted_set_3digit: frozenset,
+    ) -> bool:
+        """Return True if retrieving this instruction would be a no-op.
+
+        Prevents self-reinforcing retrieval: when the model already predicts
+        F41, instructions that say "add F41" are retrieved (high semantic
+        similarity), reinforce a correct prediction, and burn token budget
+        without contributing any corrective signal.
+
+        Rules (applied only to semantic / contrastive-swap instructions; the
+        filter is irrelevant for synthesised threshold warnings which are
+        gated on the threshold path separately):
+
+          action="add":    skip if ALL target codes are already predicted
+                           (instruction wants to add codes that are present).
+          action="remove": skip if NONE of the target codes are predicted
+                           (instruction wants to remove codes that are absent).
+
+        contrastive_swap instructions are never suppressed — they encode a
+        swap between two codes and suppression would require knowing which
+        direction the swap runs without inspecting the instruction text.
+        """
+        if instr.type == InstructionType.CONTRASTIVE_SWAP:
+            return False
+        if not instr.target_codes or not predicted_set_3digit:
+            return False
+        targets = set(instr.target_codes)
+        if instr.action == "add" and targets.issubset(predicted_set_3digit):
+            return True   # all codes to add are already present
+        if instr.action == "remove" and targets.isdisjoint(predicted_set_3digit):
+            return True   # none of the codes to remove are present
+        return False
 
     @staticmethod
     def _estimate_tokens(instruction: Instruction) -> int:

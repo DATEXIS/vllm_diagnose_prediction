@@ -76,6 +76,7 @@ def _instruction_to_row(instr: Instruction) -> dict:
     return {
         "instruction_id": instr.instruction_id,
         "type": instr.type,
+        "action": instr.action,
         "section": instr.section,
         "instruction_text": instr.instruction_text,
         "description": instr.description,
@@ -106,9 +107,16 @@ def _row_to_instruction(row: pd.Series) -> Instruction:
             return list(val)
         return [val]
 
+    # action column may be absent in parquet files written before this field
+    # was introduced. Default to "add" (the overwhelmingly common case for
+    # FN-correction semantic instructions).
+    raw_action = row.get("action", None)
+    action = raw_action if raw_action in ("add", "remove") else "add"
+
     return Instruction(
         instruction_id=int(row["instruction_id"]),
         type=row["type"],
+        action=action,
         section=row.get("section", "") or "",
         instruction_text=row["instruction_text"],
         description=row.get("description", "") or "",

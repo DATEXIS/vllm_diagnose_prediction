@@ -141,18 +141,25 @@ def log_sample_table(df: pd.DataFrame, n_samples: int = 30) -> None:
 def log_retrieval_type_pcts(events_df: pd.DataFrame) -> None:
     """Log % of each retrieval path type per iteration as wandb line-graph metrics.
 
-    Paths: semantic, threshold_fpr, threshold_fnr.
+    Semantic paths (sem_*) are collapsed into a single 'semantic' bucket so
+    the chart stays comparable across runs before/after section-based chunking.
+    Per-section breakdown is available in the retrieval_log column of the
+    sample table.
     One wandb.log call per iteration so they plot cleanly on the same axes.
     """
     if events_df.empty:
         return
-    paths = ["semantic", "semantic_reason", "threshold_fpr", "threshold_fnr"]
     for iteration, grp in events_df.groupby("iteration"):
         total = len(grp)
         counts = grp["path"].value_counts()
+        sem_count = sum(v for k, v in counts.items() if k.startswith("sem_"))
         wandb.log(
-            {f"retrieval_pct/{p}": counts.get(p, 0) / total * 100 for p in paths}
-            | {"iteration": int(iteration)}
+            {
+                "retrieval_pct/semantic": sem_count / total * 100,
+                "retrieval_pct/threshold_fpr": counts.get("threshold_fpr", 0) / total * 100,
+                "retrieval_pct/threshold_fnr": counts.get("threshold_fnr", 0) / total * 100,
+                "iteration": int(iteration),
+            }
         )
 
 

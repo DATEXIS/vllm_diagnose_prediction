@@ -24,7 +24,7 @@ data:
   target_col: "ICD_CODES"
   admission_col: "admission_note"
   discharge_col: "discharge_note"     # used by Meta-Verifier only
-  sample_size: 1500
+  sample_size: 5000
 
 # Model configuration
 model:
@@ -41,7 +41,7 @@ k8s:
     gpu_type: "b200"
     memory_limit: "1024Gi"
   client:
-    gpu_type: "v100"
+    gpu_type: "a100"
     memory_limit: "128Gi"
 
 # MERLIN 2 configuration -- defaults locked per MERLIN2_SPEC.md §6.
@@ -52,7 +52,7 @@ merlin2:
   fnr_threshold: 0.5
   min_support: 2
   convergence_threshold: 0.9
-  max_iterations: 5
+  max_iterations: 4
   max_tokens_budget: 2000        # cumulative token cap across all iterations (Verifier halt)
   per_iteration_token_budget: 400  # token cap per single retrieval call (Retriever)
   threshold_budget_fraction: 0.5   # fraction of per_iteration_token_budget for FPR/FNR warnings
@@ -77,7 +77,7 @@ merlin2:
 
 # Meta-Verifier (Loop B) -- toggle to mint instructions after a Loop-A pass.
 meta_verifier:
-  enabled: true
+  enabled: True
   embedding_model: "NeuML/pubmedbert-base-embeddings"
   temperature: 0.4
-  max_tokens: 16384
+  max_tokens: 4096

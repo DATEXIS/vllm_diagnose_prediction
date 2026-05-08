@@ -18,6 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (the prompts directory) ships with the image so prompt_loader.py can find it.
 COPY src/ src/
 COPY configs/prompts/ configs/prompts/
+COPY configs/admission_note_sections.yaml configs/admission_note_sections.yaml
 COPY data/mimic data/mimic
 COPY data/cooccurrence.parquet data/cooccurrence.parquet
 

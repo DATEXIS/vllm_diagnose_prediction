@@ -284,6 +284,7 @@ class MetaVerifier:
                 Instruction(
                     instruction_id=next_id,
                     type=inst_type,
+                    action=item.action,
                     section=item.section or "",
                     instruction_text=item.instruction_text,
                     description=item.description,
@@ -353,11 +354,14 @@ class MetaVerifier:
 
     # ------------------------------------------------------------ prompt
     def _build_audit_prompt(self, row: pd.Series) -> str:
+        # Pass full ICD codes to the meta-verifier LLM so it has the
+        # complete clinical specificity. Evaluation truncates to 3 digits,
+        # but the audit prompt should not hide sub-code information.
         return load_prompt("meta_verifier").format(
             admission_note=row["admission_note"],
             discharge_note=row.get("discharge_note", "") or "",
-            predicted_codes=", ".join(_three_digit(c) for c in row["pred_codes"]),
-            ground_truth_codes=", ".join(_three_digit(c) for c in row["true_codes"]),
+            predicted_codes=", ".join(row["pred_codes"]),
+            ground_truth_codes=", ".join(row["true_codes"]),
             hadm_id=row["hadm_id"],
             json_example=META_VERIFIER_JSON_EXAMPLE,
         )
