@@ -63,7 +63,7 @@ class TestFPThresholdPath:
     ):
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fpr_threshold=0.5,
             code_stats={"I10": _stat_fp("I10", 0.78, support_pred=20)},
         )
@@ -81,7 +81,7 @@ class TestFPThresholdPath:
     def test_fp_warning_does_not_fire_below_threshold(self, patched_encoder):
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fpr_threshold=0.5,
             code_stats={"I10": _stat_fp("I10", 0.3)},
         )
@@ -91,7 +91,7 @@ class TestFPThresholdPath:
     def test_fp_warning_does_not_fire_when_code_not_predicted(self, patched_encoder):
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fpr_threshold=0.5,
             code_stats={"I10": _stat_fp("I10", 0.78)},
         )
@@ -103,7 +103,7 @@ class TestFPThresholdPath:
         # No previous predictions => no threshold path.
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fpr_threshold=0.1,
             code_stats={"I10": _stat_fp("I10", 0.78)},
         )
@@ -114,7 +114,7 @@ class TestFPThresholdPath:
         # Without code_stats, the threshold path should be silent regardless
         # of what was predicted.
         patched_encoder.return_value = [0.0, 0.0]
-        r = Retriever(sim_threshold=0.99, fpr_threshold=0.5, code_stats={})
+        r = Retriever(sim_note_threshold=0.99, sim_icd_threshold=0.99, fpr_threshold=0.5, code_stats={})
         result = r.retrieve("note", previous_predicted_codes=["I10"])
         assert result.instructions == []
 
@@ -127,7 +127,7 @@ class TestFNCooccurrencePath:
         patched_encoder.return_value = [0.0, 0.0]
         # Predicted: I10 (hypertension). Cooccurring (high lift): N18 (CKD).
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fnr_threshold=0.4,
             cooccurrence_index={"I10": [("N18", 5.0)]},
             code_stats={"N18": _stat_fn("N18", 0.6, support_true=15)},
@@ -143,7 +143,7 @@ class TestFNCooccurrencePath:
     def test_fn_warning_does_not_fire_when_no_cooccurrence(self, patched_encoder):
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fnr_threshold=0.4,
             cooccurrence_index={},  # I10 has no cooccurring entries
             code_stats={"N18": _stat_fn("N18", 0.6)},
@@ -158,7 +158,7 @@ class TestFNCooccurrencePath:
         # I10 cooccurs with E11, not N18 — FN for N18 must not fire even
         # though N18 has a high FNR in code_stats.
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fnr_threshold=0.4,
             cooccurrence_index={"I10": [("E11", 5.0)]},
             code_stats={"N18": _stat_fn("N18", 0.6)},
@@ -169,7 +169,7 @@ class TestFNCooccurrencePath:
     def test_fn_warning_does_not_fire_below_fnr_threshold(self, patched_encoder):
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fnr_threshold=0.5,
             cooccurrence_index={"I10": [("N18", 5.0)]},
             code_stats={"N18": _stat_fn("N18", 0.3)},  # below threshold
@@ -182,7 +182,7 @@ class TestFNCooccurrencePath:
         # (i.e. its FNR never crossed the threshold during Loop B).
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fnr_threshold=0.4,
             cooccurrence_index={"I10": [("N18", 5.0)]},
             code_stats={},
@@ -195,7 +195,7 @@ class TestFNCooccurrencePath:
         # co-occur with the missed code — so it understands *why* the warning fired.
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fnr_threshold=0.4,
             cooccurrence_index={"I10": [("N18", 5.0)], "E11": [("N18", 4.0)]},
             code_stats={"N18": _stat_fn("N18", 0.6, support_true=15)},
@@ -213,7 +213,7 @@ class TestFNCooccurrencePath:
         # later case in the same batch.
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fnr_threshold=0.4,
             cooccurrence_index={"I10": [("N18", 5.0)], "K92": [("N18", 4.0)]},
             code_stats={"N18": _stat_fn("N18", 0.6, support_true=15)},
@@ -246,7 +246,7 @@ class TestSyntheticInstructionCaching:
         # repeated retrieves so the dedup / carry-over machinery works.
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fpr_threshold=0.5,
             code_stats={"I10": _stat_fp("I10", 0.78)},
         )
@@ -257,7 +257,7 @@ class TestSyntheticInstructionCaching:
     def test_already_retrieved_synthetic_is_suppressed(self, patched_encoder):
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fpr_threshold=0.5,
             code_stats={"I10": _stat_fp("I10", 0.78)},
         )
@@ -275,7 +275,7 @@ class TestSyntheticInstructionCaching:
         # retrieved, it must show up in that property.
         patched_encoder.return_value = [0.0, 0.0]
         r = Retriever(
-            sim_threshold=0.99,
+            sim_note_threshold=0.99, sim_icd_threshold=0.99,
             fpr_threshold=0.5,
             code_stats={"I10": _stat_fp("I10", 0.78)},
         )
@@ -288,7 +288,7 @@ class TestSemanticPath:
     def test_semantic_match_above_threshold(self, patched_encoder):
         # No sections → full-note fallback → path is SEM_NOTE
         patched_encoder.return_value = [1.0, 0.0]
-        r = Retriever(sim_threshold=0.8)
+        r = Retriever(sim_note_threshold=0.8, sim_icd_threshold=0.8)
         r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
         result = r.retrieve("note", previous_predicted_codes=None)
         assert [i.instruction_id for i in result.instructions] == [1]
@@ -296,7 +296,7 @@ class TestSemanticPath:
 
     def test_semantic_below_threshold_skipped(self, patched_encoder):
         patched_encoder.return_value = [1.0, 0.0]
-        r = Retriever(sim_threshold=0.99)
+        r = Retriever(sim_note_threshold=0.99, sim_icd_threshold=0.99)
         r.load_instructions([_semantic(1, ["E11"], [0.0, 1.0])])  # cos = 0
         result = r.retrieve("note", previous_predicted_codes=None)
         assert result.instructions == []
@@ -307,7 +307,7 @@ class TestSectionBasedSemanticPath:
 
     def test_matching_section_triggers_instruction(self):
         # PRESENT ILLNESS section → path SEM_ILLNESS
-        r = Retriever(sim_threshold=0.8)
+        r = Retriever(sim_note_threshold=0.8, sim_icd_threshold=0.8)
         r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
         result = r.retrieve(
             "full note text",
@@ -320,7 +320,7 @@ class TestSectionBasedSemanticPath:
 
     def test_section_path_reflects_section_name(self):
         # ALLERGIES section → path SEM_ALLERGIES when it matches.
-        r = Retriever(sim_threshold=0.8)
+        r = Retriever(sim_note_threshold=0.8, sim_icd_threshold=0.8)
         r.load_instructions([_semantic(1, ["Z88"], [1.0, 0.0])])
         result = r.retrieve(
             "full note text",
@@ -332,7 +332,7 @@ class TestSectionBasedSemanticPath:
 
     def test_non_matching_section_does_not_trigger(self):
         # Section embedding [0,1] is orthogonal to instruction embedding [1,0].
-        r = Retriever(sim_threshold=0.8)
+        r = Retriever(sim_note_threshold=0.8, sim_icd_threshold=0.8)
         r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
         result = r.retrieve(
             "full note text",
@@ -345,7 +345,7 @@ class TestSectionBasedSemanticPath:
     def test_first_matching_section_wins(self):
         # Two sections both match; instruction must appear exactly once with
         # the path of whichever section the dict iterates first.
-        r = Retriever(sim_threshold=0.8)
+        r = Retriever(sim_note_threshold=0.8, sim_icd_threshold=0.8)
         r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
         sections = {"CHIEF COMPLAINT": "DM", "PRESENT ILLNESS": "DM neuropathy"}
         result = r.retrieve(
@@ -362,7 +362,7 @@ class TestSectionBasedSemanticPath:
     def test_fallback_to_full_note_when_sections_empty(self, patched_encoder):
         # When note_sections is None, falls back to encoding the full note → SEM_NOTE
         patched_encoder.return_value = [1.0, 0.0]
-        r = Retriever(sim_threshold=0.8)
+        r = Retriever(sim_note_threshold=0.8, sim_icd_threshold=0.8)
         r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
         result = r.retrieve(
             "full note text",
@@ -383,7 +383,7 @@ class TestSectionBasedSemanticPath:
 class TestDeduplication:
     def test_already_retrieved_ids_are_suppressed(self, patched_encoder):
         patched_encoder.return_value = [1.0, 0.0]
-        r = Retriever(sim_threshold=0.5)
+        r = Retriever(sim_note_threshold=0.5, sim_icd_threshold=0.5)
         r.load_instructions([_semantic(1, ["E11"], [1.0, 0.0])])
         result = r.retrieve(
             "note", previous_predicted_codes=None, already_retrieved_ids={1}
@@ -394,7 +394,7 @@ class TestDeduplication:
 class TestPriorityAndBudget:
     def test_higher_efficacy_first(self, patched_encoder):
         patched_encoder.return_value = [1.0, 0.0]
-        r = Retriever(sim_threshold=0.5, max_tokens_budget=10_000)
+        r = Retriever(sim_note_threshold=0.5, sim_icd_threshold=0.5, max_tokens_budget=10_000)
         r.load_instructions(
             [
                 _semantic(1, ["E11"], [1.0, 0.0], efficacy=0.1),
@@ -407,7 +407,7 @@ class TestPriorityAndBudget:
     def test_budget_limits_selection(self, patched_encoder):
         patched_encoder.return_value = [1.0, 0.0]
         long_text = "word " * 50
-        r = Retriever(sim_threshold=0.5, max_tokens_budget=20)
+        r = Retriever(sim_note_threshold=0.5, sim_icd_threshold=0.5, max_tokens_budget=20)
         r.load_instructions(
             [
                 _semantic(1, ["E11"], [1.0, 0.0], text=long_text, efficacy=1.0),

@@ -115,7 +115,8 @@ async def main_async(config: dict) -> None:
 
     df = df.copy()
     df["predictions"] = [r.final_prediction.model_dump_json() for r in results]
-    df["raw_response"] = [r.final_raw_response for r in results]
+    if not config["inference"].get("guided_decoding", "true"):
+        df["raw_response"] = [r.final_raw_response for r in results]
     df["iterations"] = [r.iterations for r in results]
     df["halt_reason"] = [r.halt_reason for r in results]
     # The non-think-block parts of the prompt (system + admission note +
@@ -129,22 +130,11 @@ async def main_async(config: dict) -> None:
     # path, at what confidence.  Replaces the old `instructions` column
     # (which was a raw list of think-block strings — hard to read in wandb).
     df["retrieval_log"] = [_format_retrieval_log(r) for r in results]
-    # Reason texts from the final prediction — useful for spotting false
-    # reasoning that an instruction could correct (and for checking whether
-    # semantic_reason retrieval is firing on them).
-    df["prediction_reasons"] = [
-        " | ".join(
-            f"{d.icd_code}: {d.reason[:80]}"
-            for d in r.final_prediction.diagnoses
-        )
-        for r in results
-    ]
 
     # ------------------------------------------------------------------ Eval
     df_results = None
     if target_col in df.columns:
         metrics, df_results = evaluate_predictions(df, target_col)
-        wandb_logger.log_metrics(metrics)
         wandb_logger.log_sample_table(df_results, n_samples=30)
 
         # Per-iteration F1 trace (training only — when ground truth is present)
@@ -152,6 +142,11 @@ async def main_async(config: dict) -> None:
             per_iter = _per_iteration_metrics(results, ground_truth)
             if per_iter:
                 wandb_logger.log_per_iteration_metrics(per_iter)
+
+        # Final run-level summary metrics — logged after per-iteration metrics
+        # so wandb summary reflects the true final-prediction quality across
+        # all samples (not just those that reached the last iteration wave).
+        wandb_logger.log_metrics(metrics)
 
         # ICD count metrics
         wandb_logger.log_icd_counts(
@@ -317,6 +312,18 @@ def _per_iteration_metrics(
     return out
 
 
+def _prf(true_codes: List[str], pred_codes: List[str]) -> tuple:
+    """Return (precision, recall, f1) for a single sample."""
+    t, p = set(true_codes), set(pred_codes)
+    if not t and not p:
+        return 1.0, 1.0, 1.0
+    tp = len(t & p)
+    precision = tp / len(p) if p else 0.0
+    recall = tp / len(t) if t else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return precision, recall, f1
+
+
 def _flatten_retrieval_events(results: List[PipelineCaseResult]) -> pd.DataFrame:
     rows = []
     for r in results:
@@ -340,82 +347,114 @@ def _flatten_retrieval_events(results: List[PipelineCaseResult]) -> pd.DataFrame
 def _format_retrieval_log(result: PipelineCaseResult) -> str:
     """Build a structured retrieval log for wandb inspection.
 
-    Format per iteration:
-
+    Layout:
         True labels: A, B, C
+
+        T=0 (zero-shot): X1, Y1  R=0.50  P=0.67  F1=0.57
+        T=1: X2, Y2, Z2          R=0.67  P=0.80  F1=0.73
+        T=2 (final): X3, Y3, Z3  R=0.67  P=0.80  F1=0.73
+
+        --- Retrieved Instructions ---
         T=1:
-        Pred: X, Y, Z
+          Missed codes (FNR):
+          * M33    fnr=1.00  co-occurs-with: Z82, K86
+          Rethink codes (FPR):
+          * B18    fpr=1.00
+          Semantic Similarity:
+          * [E11]  [note]  sim=0.85  "If the note mentions long-standing DM2..."
 
-        Missed codes (FNR):
-        * M33  fnr=1.00  co-occurs-with: Z82, K86
-        * N70  fnr=1.00  co-occurs-with: N18
-
-        Rethink codes (FPR):
-        * B18  fpr=1.00
-
-        Semantic Similarity:
-        * [E11]  [note]  sim=0.85  "If the note mentions long-standing DM2..."
-        * [N18]  [icd]   sim=0.83  "When CKD is mentioned alongside..."
+    Predictions and their per-iteration scores appear first so you can scan
+    the outcome without wading through instruction text. Retrieved instructions
+    follow in a separate block.
     """
     from src.merlin2.retriever import THRESHOLD_FPR, THRESHOLD_FNR, is_semantic_path
 
     true_codes = result.history.ground_truth_codes or []
     true_str = ", ".join(sorted(true_codes)) if true_codes else "—"
 
-    blocks: List[str] = [f"True labels: {true_str}"]
+    lines: List[str] = [f"True labels: {true_str}", ""]
 
-    for t, (events, instrs) in enumerate(
-        zip(result.history.retrieval_events, result.history.instructions_used)
-    ):
-        if not events:
-            continue
-
-        # prediction that triggered this retrieval = prediction from t-1
-        pred_codes: List[str] = []
-        if t > 0 and len(result.history.predictions) >= t:
-            pred_codes = [
-                d.icd_code for d in result.history.predictions[t - 1].diagnoses
-            ]
+    # ---- Part 1: all predictions with per-iteration P/R/F1 ----------------
+    n_preds = len(result.history.predictions)
+    for t, pred_model in enumerate(result.history.predictions):
+        pred_codes = [
+            normalize_icd(d.icd_code)
+            for d in pred_model.diagnoses
+            if normalize_icd(d.icd_code)
+        ]
         pred_str = ", ".join(pred_codes) if pred_codes else "—"
 
-        ev_by_id = {ev.instruction_id: ev for ev in events}
+        labels = []
+        if t == 0:
+            labels.append("zero-shot")
+        if t == n_preds - 1 and n_preds > 1:
+            labels.append("final")
+        label_suffix = f" ({', '.join(labels)})" if labels else ""
 
-        fnr_lines: List[str] = []
-        fpr_lines: List[str] = []
-        sem_lines: List[str] = []
+        if true_codes:
+            prec, rec, f1 = _prf(true_codes, pred_codes)
+            score_str = f"  R={rec:.2f}  P={prec:.2f}  F1={f1:.2f}"
+        else:
+            score_str = ""
 
-        for instr in instrs:
-            ev = ev_by_id.get(instr.instruction_id)
-            if ev is None:
+        lines.append(f"T={t}{label_suffix}: {pred_str}{score_str}")
+
+    # ---- Part 2: retrieved instructions, grouped by iteration --------------
+    retrieval_pairs = list(
+        zip(result.history.retrieval_events, result.history.instructions_used)
+    )
+    has_retrievals = any(events for events, _ in retrieval_pairs)
+
+    if has_retrievals:
+        lines.append("\n--- Retrieved Instructions ---")
+
+        for t, (events, instrs) in enumerate(retrieval_pairs):
+            if not events:
                 continue
-            codes_tag = ", ".join(ev.target_codes) if ev.target_codes else "?"
-            snippet = (instr.instruction_text or "")[:90].replace("\n", " ")
 
-            if ev.path == THRESHOLD_FNR:
-                cooccur = (
-                    f"  co-occurs-with: {', '.join(sorted(ev.trigger_codes))}"
-                    if ev.trigger_codes else ""
-                )
-                fnr_lines.append(f"* {codes_tag:<6}  fnr={ev.trigger_value:.2f}{cooccur}")
-            elif ev.path == THRESHOLD_FPR:
-                fpr_lines.append(f"* {codes_tag:<6}  fpr={ev.trigger_value:.2f}")
-            elif is_semantic_path(ev.path):
-                section_tag = ev.path.removeprefix("sem_")
-                sem_lines.append(f"* [{codes_tag}]  [{section_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\"")
+            ev_by_id = {ev.instruction_id: ev for ev in events}
+            fnr_lines: List[str] = []
+            fpr_lines: List[str] = []
+            sem_lines: List[str] = []
 
-        section: List[str] = [f"\nT={t}:", f"Pred: {pred_str}"]
-        if fnr_lines:
-            section.append("\nMissed codes (FNR):")
-            section.extend(fnr_lines)
-        if fpr_lines:
-            section.append("\nRethink codes (FPR):")
-            section.extend(fpr_lines)
-        if sem_lines:
-            section.append("\nSemantic Similarity:")
-            section.extend(sem_lines)
-        blocks.append("\n".join(section))
+            for instr in instrs:
+                ev = ev_by_id.get(instr.instruction_id)
+                if ev is None:
+                    continue
+                codes_tag = ", ".join(ev.target_codes) if ev.target_codes else "?"
+                snippet = (instr.instruction_text or "")[:90].replace("\n", " ")
 
-    return "\n".join(blocks) if len(blocks) > 1 else "(no retrievals)"
+                if ev.path == THRESHOLD_FNR:
+                    cooccur = (
+                        f"  co-occurs-with: {', '.join(sorted(ev.trigger_codes))}"
+                        if ev.trigger_codes else ""
+                    )
+                    fnr_lines.append(
+                        f"  * {codes_tag:<6}  fnr={ev.trigger_value:.2f}{cooccur}"
+                    )
+                elif ev.path == THRESHOLD_FPR:
+                    fpr_lines.append(
+                        f"  * {codes_tag:<6}  fpr={ev.trigger_value:.2f}"
+                    )
+                elif is_semantic_path(ev.path):
+                    section_tag = ev.path.removeprefix("sem_")
+                    sem_lines.append(
+                        f"  * [{codes_tag}]  [{section_tag}]"
+                        f"  sim={ev.trigger_value:.2f}  \"{snippet}\""
+                    )
+
+            lines.append(f"\nT={t}:")
+            if fnr_lines:
+                lines.append("  Missed codes (FNR):")
+                lines.extend(fnr_lines)
+            if fpr_lines:
+                lines.append("  Rethink codes (FPR):")
+                lines.extend(fpr_lines)
+            if sem_lines:
+                lines.append("  Semantic Similarity:")
+                lines.extend(sem_lines)
+
+    return "\n".join(lines)
 
 
 def main() -> None:

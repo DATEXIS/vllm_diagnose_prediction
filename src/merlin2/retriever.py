@@ -4,11 +4,15 @@ Three retrieval paths, OR'd together:
 
   * Semantic path        — embed the admission note, retrieve instructions
                            from the persistent store whose `description`
-                           embedding has cosine similarity >= sim_threshold.
+                           embedding has cosine similarity >= sim_note_threshold.
 
   * Semantic-reason path — embed each reason text from the previous
                            iteration's prediction and query the same
                            instruction store.  Fires at t>=1 only.
+                           Uses sim_icd_threshold (typically lower than
+                           sim_note_threshold) so ICD-level reasoning can
+                           surface instructions that the admission note alone
+                           wouldn't retrieve.
                            Rationale: the model's reasoning can (a) contain
                            false clinical statements that a targeted
                            instruction can correct, and (b) surface cues for
@@ -136,7 +140,7 @@ def _build_threshold_text(
         if trigger_codes:
             codes_str = ", ".join(sorted(trigger_codes))
             cooccur_clause = (
-                f" It frequently co-occurs with {codes_str} (which you predicted)."
+                f" It frequently co-occurs with your prediction {codes_str}."
             )
         return (
             f"Code {code} is missed in {stat.fnr:.0%} of cases where it should "
@@ -169,7 +173,8 @@ class Retriever:
 
     def __init__(
         self,
-        sim_threshold: float = 0.8,
+        sim_note_threshold: float = 0.8,
+        sim_icd_threshold: float = 0.8,
         fpr_threshold: float = 0.5,
         fnr_threshold: float = 0.5,
         max_tokens_budget: int = 2500,
@@ -180,7 +185,8 @@ class Retriever:
         section_names: Optional[List[str]] = None,
         ignore_phrases: Optional[List[str]] = None,
     ):
-        self.sim_threshold = sim_threshold
+        self.sim_note_threshold = sim_note_threshold
+        self.sim_icd_threshold = sim_icd_threshold
         self.fpr_threshold = fpr_threshold
         self.fnr_threshold = fnr_threshold
         self.max_tokens_budget = max_tokens_budget
@@ -368,7 +374,7 @@ class Retriever:
                 denom = self._emb_norms * sec_norm
                 with np.errstate(invalid="ignore", divide="ignore"):
                     sims = np.where(denom > 0, dots / denom, 0.0)
-                hits = np.where(sims >= self.sim_threshold)[0]
+                hits = np.where(sims >= self.sim_note_threshold)[0]
                 for h in hits:
                     instr_idx = self._emb_indices[int(h)]
                     instr = self._instructions[instr_idx]
@@ -409,7 +415,7 @@ class Retriever:
                 denom = self._emb_norms * reason_norm
                 with np.errstate(invalid="ignore", divide="ignore"):
                     sims = np.where(denom > 0, dots / denom, 0.0)
-                hits = np.where(sims >= self.sim_threshold)[0]
+                hits = np.where(sims >= self.sim_icd_threshold)[0]
                 for h in hits:
                     instr_idx = self._emb_indices[int(h)]
                     instr = self._instructions[instr_idx]

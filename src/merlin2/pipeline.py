@@ -147,7 +147,8 @@ class MERLINPipeline:
             )
         )
         return Retriever(
-            sim_threshold=merlin2_cfg.get("sim_threshold", 0.8),
+            sim_note_threshold=merlin2_cfg.get("sim_note_threshold", 0.8),
+            sim_icd_threshold=merlin2_cfg.get("sim_icd_threshold", 0.8),
             fpr_threshold=merlin2_cfg.get("fpr_threshold", 0.5),
             fnr_threshold=merlin2_cfg.get("fnr_threshold", 0.5),
             max_tokens_budget=merlin2_cfg.get("max_tokens_budget", 2500),

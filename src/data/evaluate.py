@@ -54,6 +54,18 @@ def safe_parse_true_labels(val: Any) -> List[str]:
     return []
 
 
+def sample_prf(true_codes: List[str], pred_codes: List[str]) -> tuple:
+    """Return (precision, recall, f1) for a single sample at the 3-digit ICD level."""
+    t, p = set(true_codes), set(pred_codes)
+    if not t and not p:
+        return 1.0, 1.0, 1.0
+    tp = len(t & p)
+    precision = tp / len(p) if p else 0.0
+    recall = tp / len(t) if t else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return precision, recall, f1
+
+
 def calculate_metrics(y_true: List[List[str]], y_pred: List[List[str]]) -> dict:
     """Compute multi-label P/R/F1 (micro and macro) over a label union."""
     all_labels = set()
@@ -129,4 +141,5 @@ def evaluate_predictions(df: pd.DataFrame, target_col: str):
     df = df.copy()
     df["parsed_predictions"] = y_pred_lists
     df["full_diagnoses"] = full_diagnoses
+    df["sample_f1"] = [sample_prf(t, p)[2] for t, p in zip(y_true_norm, y_pred_norm)]
     return metrics, df

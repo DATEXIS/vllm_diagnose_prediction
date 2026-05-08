@@ -88,7 +88,8 @@ def log_parameters(config: Dict[str, Any]) -> None:
             "concurrency": inf.get("concurrency"),
             "guided_decoding": inf.get("guided_decoding"),
             "sample_size": data.get("sample_size"),
-            "merlin2.sim_threshold": merlin2.get("sim_threshold"),
+            "merlin2.sim_note_threshold": merlin2.get("sim_note_threshold"),
+            "merlin2.sim_icd_threshold": merlin2.get("sim_icd_threshold"),
             "merlin2.fpr_threshold": merlin2.get("fpr_threshold"),
             "merlin2.fnr_threshold": merlin2.get("fnr_threshold"),
             "merlin2.convergence_threshold": merlin2.get("convergence_threshold"),
@@ -103,7 +104,13 @@ def log_parameters(config: Dict[str, Any]) -> None:
 
 
 def log_metrics(metrics: Dict[str, Any]) -> None:
-    wandb.log(
+    """Log run-level summary metrics.
+
+    Uses wandb.summary so these values always reflect the final state of the
+    run (all samples' final predictions) and are not a time-series step that
+    could be confused with per-iteration iter/all/* metrics.
+    """
+    wandb.summary.update(
         {
             "f1_micro": metrics["micro"]["f1"],
             "f1_macro": metrics["macro"]["f1"],
@@ -132,8 +139,23 @@ def log_per_iteration_metrics(per_iter: List[Dict[str, Any]]) -> None:
 
 
 def log_sample_table(df: pd.DataFrame, n_samples: int = 30) -> None:
-    """Log a small sample table for debugging. Strings only; no nested objects."""
-    log_df = df.drop(columns=['hadm_id', 'subject_id', 'discharge_note'], errors="ignore")
+    """Log a small sample table for debugging. Strings only; no nested objects.
+
+    Drops verbose / redundant columns:
+      - hadm_id / subject_id / discharge_note: identifiers or long text
+      - predictions: raw ICDsModel JSON — full_diagnoses and parsed_predictions
+        carry the same data in a more readable form and are always derived from
+        r.final_prediction, so logging the raw JSON would be redundant.
+      - admission_note: too long for a table cell; available in the data file.
+      - ICD_CODES / true_labels (original target column): already normalised
+        into true_codes by the pipeline.
+    """
+    drop_cols = [
+        'hadm_id', 'subject_id', 'discharge_note',
+        'predictions',       # verbose JSON; full_diagnoses / parsed_predictions are cleaner
+        'admission_note',    # too long for table inspection
+    ]
+    log_df = df.drop(columns=drop_cols, errors="ignore")
     sample = log_df.head(n_samples).map(str)
     wandb.log({"sample_predictions": wandb.Table(dataframe=sample)})
 
@@ -153,9 +175,12 @@ def log_retrieval_type_pcts(events_df: pd.DataFrame) -> None:
         total = len(grp)
         counts = grp["path"].value_counts()
         sem_count = sum(v for k, v in counts.items() if k.startswith("sem_"))
+        sem_icd_count = sum(v for k, v in counts.items() if k.startswith("sem_icd"))
+        sem_count = sem_count - sem_icd_count
         wandb.log(
             {
-                "retrieval_pct/semantic": sem_count / total * 100,
+                "retrieval_pct/semantic_note": sem_count / total * 100,
+                "retrieval_pct/semantic_icd": sem_icd_count / total * 100,
                 "retrieval_pct/threshold_fpr": counts.get("threshold_fpr", 0) / total * 100,
                 "retrieval_pct/threshold_fnr": counts.get("threshold_fnr", 0) / total * 100,
                 "iteration": int(iteration),
@@ -271,6 +296,6 @@ def log_meta_verifier_instructions(instructions: List[Instruction]) -> None:
             "source_hadm_ids": ",".join(i.source_hadm_ids),
             "has_embedding": i.semantic_embedding is not None,
         }
-        for i in instructions
+        for i in instructions[:100]
     ]
     wandb.log({"meta_verifier_instructions": wandb.Table(dataframe=pd.DataFrame(rows))})
