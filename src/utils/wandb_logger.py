@@ -101,10 +101,15 @@ def log_per_iteration_metrics(per_iter: List[Dict[str, Any]]) -> None:
         wandb.log(log_dict)
 
 
-def log_sample_table(df: pd.DataFrame, n_samples: int = 30) -> None:
-    """Log a small sample table for debugging. Strings only; no nested objects."""
+def log_sample_table(df: pd.DataFrame, n_samples: int | None = None) -> None:
+    """Log patient rows for the replay UI (``sample_predictions`` table).
+
+    If ``n_samples`` is ``None``, every row is logged. Otherwise only the first
+    ``n_samples`` rows (legacy dev default was 30).
+    """
     log_df = df.drop(columns=['hadm_id', 'subject_id', 'discharge_note'], errors="ignore")
-    sample = log_df.head(n_samples).map(str)
+    out = log_df if n_samples is None else log_df.head(n_samples)
+    sample = out.map(str)
     wandb.log({"sample_predictions": wandb.Table(dataframe=sample)})
 
 

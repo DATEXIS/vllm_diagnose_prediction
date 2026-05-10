@@ -1,19 +1,43 @@
-FROM python:3.11-slim
+FROM node:20-bookworm AS builder
+
+WORKDIR /app/dashboard
+
+COPY UI/dashboard/package.json UI/dashboard/package-lock.json ./
+RUN npm ci
+
+COPY UI/dashboard/ ./
+RUN npm run build
+
+FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-COPY UI/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r /app/requirements.txt
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 python3-pip \
+  && rm -rf /var/lib/apt/lists/*
 
-COPY UI /app/UI
-COPY config.json /app/config.json
+COPY UI/py/requirements-fetch.txt /tmp/requirements-fetch.txt
+RUN pip3 install --no-cache-dir --break-system-packages \
+  -r /tmp/requirements-fetch.txt \
+  && rm /tmp/requirements-fetch.txt
 
-ENV PYTHONUNBUFFERED=1
-ENV STREAMLIT_SERVER_HEADLESS=true
-ENV STREAMLIT_SERVER_PORT=8501
-ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
+ENV MERLIN_UI_ROOT=/app/UI
+ENV MERLIN_CONFIG_JSON=/app/config.json
 
-EXPOSE 8501
+COPY --from=builder /app/dashboard/.next/standalone ./
+COPY --from=builder /app/dashboard/.next/static ./.next/static
 
-CMD ["streamlit", "run", "/app/UI/app.py"]
+COPY UI/ICD_names ./UI/ICD_names
+COPY UI/py ./UI/py
+
+RUN mkdir -p ./UI/wandb_cache && chmod -R u+rwx ./UI
+
+COPY config.json ./config.json
+
+EXPOSE 3000
+
+CMD ["node", "server.js"]

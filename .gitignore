@@ -135,3 +135,5 @@ dmypy.json
 .ui_tmp_venv/
 config.json
 opencode.json
+UI/dashboard/.next/
+UI/dashboard/node_modules/

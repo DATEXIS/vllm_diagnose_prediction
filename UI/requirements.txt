@@ -1,6 +1,3 @@
-streamlit
-wandb
-protobuf==6.32.1
-pandas
-pyarrow
-PyYAML
+# Streamlit dashboard has been superseded by `UI/dashboard` (Next.js).
+# W&B download helper for the Next API layer:
+-r py/requirements-fetch.txt

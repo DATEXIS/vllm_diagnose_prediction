@@ -16,10 +16,10 @@ spec:
         app: merlin-ui
     spec:
       containers:
-        - name: streamlit-ui
+        - name: next-ui
           image: registry.datexis.com/yxsg9647/merlin_2_ui:latest
           ports:
-            - containerPort: 8501
+            - containerPort: 3000
           env:
             - name: WANDB_API_KEY
               valueFrom:
@@ -47,5 +47,5 @@ spec:
     app: merlin-ui
   ports:
     - protocol: TCP
-      port: 8501
-      targetPort: 8501
+      port: 3000
+      targetPort: 3000
