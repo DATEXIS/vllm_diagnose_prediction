@@ -138,6 +138,7 @@ def log_per_iteration_metrics(per_iter: List[Dict[str, Any]]) -> None:
         wandb.log(log_dict)
 
 
+
 def log_sample_table(df: pd.DataFrame, n_samples: int = 30) -> None:
     """Log a small sample table for debugging. Strings only; no nested objects.
 

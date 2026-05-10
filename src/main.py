@@ -135,7 +135,9 @@ async def main_async(config: dict) -> None:
     df_results = None
     if target_col in df.columns:
         metrics, df_results = evaluate_predictions(df, target_col)
-        wandb_logger.log_sample_table(df_results, n_samples=30)
+        wandb_logger.log_metrics(metrics)
+        wandb_logger.log_sample_table(df_results)
+
 
         # Per-iteration F1 trace (training only — when ground truth is present)
         if ground_truth is not None:

@@ -132,6 +132,13 @@ dmypy.json
 
 # macOS
 .DS_Store
+.ui_tmp_venv/
+config.json
+opencode.json
+UI/dashboard/.next/
+UI/dashboard/node_modules/
+
 
 # claude
 .claude
+

@@ -1,0 +1,158 @@
+_wandb:
+    value:
+        cli_version: 0.26.1
+        e:
+            sqcfupi0aofmm8t1v3gnoi656hfbbarx:
+                args:
+                    - --config
+                    - /app/config/config.yaml
+                cpu_count: 128
+                cpu_count_logical: 256
+                disk:
+                    /:
+                        total: "1888426192896"
+                        used: "1298439286784"
+                email: jan.frick8@gmail.com
+                executable: /usr/local/bin/python3
+                host: diagnose-prediction-merlin2-rgz4m
+                memory:
+                    total: "1077383720960"
+                os: Linux-6.8.0-1050-nvidia-x86_64-with-glibc2.41
+                program: -m src.main
+                python: CPython 3.10.20
+                root: /app
+                startedAt: "2026-05-04T14:45:04.298278Z"
+                writerId: sqcfupi0aofmm8t1v3gnoi656hfbbarx
+        m: []
+        python_version: 3.10.20
+        t:
+            "1":
+                - 1
+                - 5
+                - 53
+            "2":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 75
+            "3":
+                - 2
+                - 13
+                - 16
+                - 41
+            "4": 3.10.20
+            "5": 0.26.1
+            "12": 0.26.1
+            "13": linux-x86_64
+concurrency:
+    value: 64
+data:
+    value:
+        admission_col: admission_note
+        discharge_col: discharge_note
+        patients_file: data/mimic/hosp_icd10_train.pq
+        sample_size: 1000
+        target_col: ICD_CODES
+docker:
+    value:
+        image_name: merlin_2
+        platform: linux/amd64
+        registry: registry.datexis.com/jfrick
+        server_image: vllm/vllm-openai:v0.19.1
+        tag: latest
+guided_decoding:
+    value: false
+inference:
+    value:
+        concurrency: 64
+        guided_decoding: false
+        max_tokens: 3000
+        reasoning_budget: 1024
+        temperature: 0.2
+job_name:
+    value: merlin2
+k8s:
+    value:
+        client:
+            memory_limit: 256Gi
+        image_pull_secrets: private-registry-auth
+        namespace: jfrick
+        server:
+            gpu_count: 1
+            gpu_type: b200
+            memory_limit: 1024Gi
+log_level:
+    value: INFO
+max_model_len:
+    value: 16384
+max_tokens:
+    value: 3000
+merlin2:
+    value:
+        code_stats_artifact_name: code_stats
+        code_stats_artifact_version: latest
+        code_stats_path: data/code_stats.parquet
+        convergence_threshold: 0.9
+        cooccurrence_min_joint_count: 3
+        cooccurrence_path: data/cooccurrence.parquet
+        cooccurrence_threshold: 3
+        cooccurrence_top_k: 10
+        enabled: true
+        fnr_threshold: 0.5
+        fpr_threshold: 0.5
+        instructions_artifact_name: instructions_db
+        instructions_artifact_version: latest
+        instructions_path: data/instructions.parquet
+        learning_rate: 1.2
+        max_iterations: 5
+        max_tokens_budget: 2000
+        min_support: 2
+        per_iteration_token_budget: 400
+        sim_threshold: 0.95
+        threshold_budget_fraction: 0.5
+merlin2.convergence_threshold:
+    value: 0.9
+merlin2.fnr_threshold:
+    value: 0.5
+merlin2.fpr_threshold:
+    value: 0.5
+merlin2.learning_rate:
+    value: 1.2
+merlin2.max_iterations:
+    value: 5
+merlin2.max_tokens_budget:
+    value: 2000
+merlin2.min_support:
+    value: 2
+merlin2.per_iteration_token_budget:
+    value: 400
+merlin2.sim_threshold:
+    value: 0.95
+meta_verifier:
+    value:
+        embedding_model: NeuML/pubmedbert-base-embeddings
+        enabled: true
+        max_tokens: 8192
+        temperature: 0.4
+model:
+    value:
+        enable_chunked_prefill: true
+        max_model_len: 16384
+        max_num_batched_tokens: 131072
+        max_num_seqs: 1024
+        name: Qwen/Qwen3-32B
+model_name:
+    value: Qwen/Qwen3-32B
+run_name:
+    value: merlin2-opus-code
+sample_size:
+    value: 1000
+temperature:
+    value: 0.2
+wandb:
+    value:
+        entity: datexis-phd
+        project: ICD-prediction

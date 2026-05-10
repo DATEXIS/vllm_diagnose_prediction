@@ -19,3 +19,6 @@ patients data/
 .vscode/
 *.swp
 *.swo
+UI/dashboard/node_modules/
+UI/dashboard/.next/
+UI/wandb_cache/
