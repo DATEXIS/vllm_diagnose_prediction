@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import List
 import torch
 
 logger = logging.getLogger(__name__)
@@ -15,20 +15,20 @@ def get_device() -> str:
     return "cpu"
 
 
-def load_embedding_model(model_name: str = "microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract") -> None:
+def load_embedding_model(model_name: str = "NeuML/pubmedbert-base-embeddings") -> None:
     """Load sentence-transformers model for embeddings.
-    
+
     Args:
         model_name: HuggingFace model name. Default: PubMedBERT for biomedical text.
     """
     global _model, _device
-    
+
     if _model is not None:
         return
-    
+
     try:
         from sentence_transformers import SentenceTransformer
-        
+
         _device = get_device()
         logger.info(f"Loading embedding model '{model_name}' on {_device}")
         _model = SentenceTransformer(model_name, device=_device)
