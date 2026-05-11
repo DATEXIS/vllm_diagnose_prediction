@@ -162,6 +162,10 @@ def _build_index_from_abstracts(abstracts_path: str, index_persist_dir: str, max
 _NCBI_FTP_BASE = "https://ftp.ncbi.nlm.nih.gov/pub/lu/MedCPT/pubmed_embeddings"
 _IVFPQ_M = 96    # subquantizers; 768 / 96 = 8 dims each → 96 bytes/vector
 _IVFPQ_NBITS = 8  # 256 centroids per subquantizer
+# Old PubMed entries store MeSH headings/symptom lists in the "a" field instead
+# of a real abstract; these are typically <100 chars. 200 chars is a safe floor
+# that excludes them while keeping all legitimate short abstracts.
+_MIN_ABSTRACT_CHARS = 200
 
 
 class TextAccessor:
@@ -338,19 +342,32 @@ def _build_index_from_precomputed(
                 )
                 first_chunk = False
 
-            # Filter: only index articles that have a non-empty abstract.
+            # Filter: only index articles whose abstract is a real abstract.
+            # Old PubMed entries have MeSH headings / symptom lists in "a"
+            # (e.g. "Chills and Fever.. Fever and Ague.."); require at least
+            # _MIN_ABSTRACT_CHARS characters so those are excluded.
             keep_mask = []
+            n_no_abstract = 0
+            n_too_short   = 0
             for pmid in pmids:
                 article  = pubmed_data.get(str(pmid), {})
                 abstract = article.get("a", "").strip()
-                keep_mask.append(bool(abstract))
+                if not abstract:
+                    keep_mask.append(False)
+                    n_no_abstract += 1
+                elif len(abstract) < _MIN_ABSTRACT_CHARS:
+                    keep_mask.append(False)
+                    n_too_short += 1
+                else:
+                    keep_mask.append(True)
 
             kept    = sum(keep_mask)
             skipped = len(pmids) - kept
             total_skipped += skipped
             logger.info(
-                f"  Chunk {chunk_id}: {kept:,} articles with abstracts, "
-                f"{skipped:,} skipped (no abstract)."
+                f"  Chunk {chunk_id}: {kept:,} articles indexed, "
+                f"{n_no_abstract:,} skipped (no abstract), "
+                f"{n_too_short:,} skipped (abstract < {_MIN_ABSTRACT_CHARS} chars — likely MeSH headings)."
             )
 
             # Add only the kept embeddings to FAISS
@@ -376,8 +393,8 @@ def _build_index_from_precomputed(
     offsets_arr = np.array(offsets, dtype=np.int64)
 
     logger.info(
-        f"Indexing complete: {index.ntotal:,} articles with abstracts indexed "
-        f"({total_skipped:,} skipped — no abstract). "
+        f"Indexing complete: {index.ntotal:,} articles indexed "
+        f"({total_skipped:,} skipped — no/short abstract). "
         f"texts.txt: {len(offsets_arr):,} lines."
     )
 

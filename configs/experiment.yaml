@@ -2,7 +2,7 @@
 # Changed per experiment/run (no server rebuild required for most params)
 
 # Run identification
-job_name: "experiment-queries"
+job_name: "experiment-query-prompts"
 run_name: "qwen8b-guided-decoding"
 
 # Logging level
@@ -19,7 +19,7 @@ inference:
 data:
   patients_file: "data/mimic/patients_1411.pq"
   target_col: "ICD_CODES"
-  sample_size: 100
+  sample_size: 10
 
 # Model configuration
 model:
@@ -52,7 +52,7 @@ rag:
     enabled: true  # rewrite admission notes into focused medical queries before retrieval
     n_queries: 3   # >1 generates diverse query variants covering different aspects of the note
   reranking:
-    enabled: true  # re-rank retrieved candidates with MedCPT-Cross-Encoder before trimming to top_k
+    enabled: false  # re-rank retrieved candidates with MedCPT-Cross-Encoder before trimming to top_k
     fetch_k: 30    # candidates to fetch per query before re-ranking (should be > top_k)
 
 # Kubernetes cluster configuration
