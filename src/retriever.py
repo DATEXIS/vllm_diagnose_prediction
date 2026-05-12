@@ -430,22 +430,23 @@ _SINGLE_QUERY_PROMPT = (
 )
 
 _MULTI_QUERY_PROMPT = (
-    "You are a senior physician creating PubMed search queries to find literature "
-    "for a complex case. Generate exactly {n} natural language queries.\n\n"
-    "Think about the DIFFERENTIAL DIAGNOSIS and generate:\n"
-    "1. The most RARE condition in the differential that fits this presentation.\n"
-    "2. The most SPECIFIC complication or unusual manifestation of the primary diagnosis.\n"
-    "3. A query targeting the COMBINATION of comorbidities that rarely co-occur "
-    "and may affect each other.\n\n"
+    "You help improve ICD code prediction by finding literature about rare diagnoses.\n"
+    "The goal is to retrieve PubMed articles that describe CONDITIONS THAT ARE EASY TO MISS "
+    "or RARELY CODED but are documented in this admission note.\n\n"
+    "Generate exactly {n} natural language search queries:\n"
+    "1. A rare or secondary diagnosis that could be OVERLOOKED in this case — "
+    "describe the condition and why it might be present.\n"
+    "2. A complication or manifestation that requires a SEPARATE, SPECIFIC ICD code — "
+    "be as specific as possible.\n"
+    "3. An UNDERLYING CAUSE or ETIOLOGY of the main complaint that is uncommon — "
+    "describe the mechanism or rare cause.\n\n"
     "Rules:\n"
-    "- Write as natural clinical phrases — NO Boolean syntax.\n"
-    "- Each query should target a DIFFERENT aspect of the differential.\n"
-    "- Prioritize specificity: 'necrotizing pancreatitis coagulopathy' "
-    "is better than 'pancreatitis complication'.\n"
+    "- Natural language only — absolutely NO AND/OR/NOT operators.\n"
+    "- Focus on conditions that are present but might not be the primary diagnosis.\n"
     "- Maximum 20 words per query.\n"
     "- Output exactly {n} numbered lines. No explanation.\n\n"
     "Admission note:\n{note}\n\n"
-    "Differential-focused queries:"
+    "Long-tail ICD queries:"
 )
 
 
