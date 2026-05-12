@@ -430,23 +430,23 @@ _SINGLE_QUERY_PROMPT = (
 )
 
 _MULTI_QUERY_PROMPT = (
-    "You help improve ICD code prediction by finding literature about rare diagnoses.\n"
-    "The goal is to retrieve PubMed articles that describe CONDITIONS THAT ARE EASY TO MISS "
-    "or RARELY CODED but are documented in this admission note.\n\n"
-    "Generate exactly {n} natural language search queries:\n"
-    "1. A rare or secondary diagnosis that could be OVERLOOKED in this case — "
-    "describe the condition and why it might be present.\n"
-    "2. A complication or manifestation that requires a SEPARATE, SPECIFIC ICD code — "
-    "be as specific as possible.\n"
-    "3. An UNDERLYING CAUSE or ETIOLOGY of the main complaint that is uncommon — "
-    "describe the mechanism or rare cause.\n\n"
+    "You rewrite clinical admission notes into exactly {n} dense retrieval queries for ICD coding support. \n"
+    "Generate queries in this order:\n\n"
+    "1. Rare, secondary, or easily missed diagnoses and complications.\n"
+    "2. Primary diagnosis with key symptoms, findings, and manifestations.\n"
+    "3. Important comorbidity interactions, procedures, medications, or chronic conditions.\n\n"
     "Rules:\n"
-    "- Natural language only — absolutely NO AND/OR/NOT operators.\n"
-    "- Focus on conditions that are present but might not be the primary diagnosis.\n"
-    "- Maximum 20 words per query.\n"
-    "- Output exactly {n} numbered lines. No explanation.\n\n"
+    "- Use only explicitly stated information.\n"
+    "- Prioritize specific clinical findings over broad disease names.\n"
+    "- Include symptoms, manifestations, abnormal findings, complications, procedures, and relevant medications.\n"
+    "- Preserve negations and temporality.\n"
+    "- Use concise natural medical language optimized for dense vector retrieval.\n"
+    "- NO Boolean operators, ICD codes, explanations, or full sentences.\n"
+    "- Each query should target DIFFERENT possible ICD code groups.\n"
+    "- Maximum 25 words per query.\n\n"
+    "Output exactly {n} numbered lines.\n"
     "Admission note:\n{note}\n\n"
-    "Long-tail ICD queries:"
+    "Queries:"
 )
 
 
