@@ -1,2 +1,7 @@
+# Used by UI/py/fetch_run.py when you click "Load run" in the Next dashboard.
+#
+# Local dev (repo root): the app prefers `.venv/bin/python3` when present:
+#   python3 -m venv .venv  &&  .venv/bin/pip install -r UI/py/requirements-fetch.txt
+# Or set PYTHON_BIN to any interpreter that has `wandb` installed.
 wandb>=0.19.1
 protobuf>=4.21.0,<7

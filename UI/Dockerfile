@@ -1,3 +1,12 @@
+# Build with the repository root as context (not `UI/`), otherwise paths like
+# `COPY UI/dashboard/...` and `COPY config.json` will not exist in the context.
+#
+#   cd /path/to/vllm_diagnose_prediction
+#   docker build --platform linux/amd64 -f UI/Dockerfile -t registry.datexis.com/yxsg9647/merlin_2_ui:latest .
+#
+# On the cluster, `WANDB_API_KEY` is injected via the Deployment secret; the baked
+# `config.json` is optional for local/offline convenience (see `pythonFetch.ts`).
+
 FROM node:20-bookworm AS builder
 
 WORKDIR /app/dashboard

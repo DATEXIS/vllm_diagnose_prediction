@@ -8,7 +8,6 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleCheck,
-  CircleHelp,
   CircleX,
   ClipboardList,
   FileText,
@@ -51,15 +50,11 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Slider } from "@/components/ui/slider";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { IcdMaps } from "@/lib/icdResolve";
 import { formatCodeLine } from "@/lib/icdResolve";
 import {
+  admissionNoteFromRow,
   buildIterationRecords,
   coerceGroundTruthCodes,
   extractNoteSummary,
@@ -69,9 +64,9 @@ import {
 import { defaultRunUrl } from "@/lib/runPath";
 
 const SCALE_HEIGHTS = {
-  Small: { note: 280, list: 200 },
-  Medium: { note: 360, list: 260 },
-  Large: { note: 460, list: 340 },
+  Small: { note: 160, list: 96 },
+  Medium: { note: 200, list: 120 },
+  Large: { note: 260, list: 160 },
 } as const;
 
 type PaneScale = keyof typeof SCALE_HEIGHTS | "Custom";
@@ -80,14 +75,14 @@ function sliderFirst(v: number | readonly number[]): number {
   return Array.isArray(v) ? Number(v[0]) : Number(v);
 }
 
-function scrollBoxStyle(h: number, extra = 100) {
+function scrollBoxStyle(h: number, extra = 48) {
   return {
     minHeight: h,
-    maxHeight: `min(38vh, ${h + extra}px)`,
+    maxHeight: `min(24vh, ${h + extra}px)`,
   } as const;
 }
 
-function metricsFromCodes(pred: string[], gt: string[]) {
+function f1FromBucketOverlap(pred: string[], gt: string[]): number | null {
   const pset = new Set(pred);
   const gset = new Set(gt);
   let tp = 0;
@@ -101,20 +96,20 @@ function metricsFromCodes(pred: string[], gt: string[]) {
   }
   const prec = tp + fp === 0 ? null : tp / (tp + fp);
   const rec = tp + fn === 0 ? null : tp / (tp + fn);
-  const f1 =
-    prec != null && rec != null && prec + rec > 0
-      ? (2 * prec * rec) / (prec + rec)
-      : null;
-  return { tp, fp, fn, prec, rec, f1 };
+  if (prec == null || rec == null || prec + rec === 0) return null;
+  return (2 * prec * rec) / (prec + rec);
 }
 
 function formatScore(n: number | null, digits = 3) {
   return n == null || !Number.isFinite(n) ? "—" : n.toFixed(digits);
 }
 
+const NO_ADMISSION_IN_TABLE_MSG =
+  "This W&B sample_predictions row has no admission narrative column (Merlin2 slim exports often omit `admission_note`). Downloaded artifacts (instructions_db, code_stats) do not store per-patient text. Re-log the table with `admission_note`, or load a CSV that includes it and join by `hadm_id`.";
+
 function patientTitleFromRow(row: Record<string, unknown> | null, index: number) {
   if (!row) return `Patient ${String(index).padStart(5, "0")}`;
-  const note = String(row.admission_note ?? "").trim();
+  const note = admissionNoteFromRow(row);
   if (!note) return `Patient ${String(index).padStart(5, "0")}`;
   const first =
     note
@@ -199,21 +194,21 @@ function PredictionPanelCard({
   return (
     <div
       className={cn(
-        "animate-in fade-in-0 slide-in-from-bottom-1 rounded-2xl border duration-300",
+        "animate-in fade-in-0 slide-in-from-bottom-1 rounded-xl border duration-100",
         "transition-[box-shadow,transform] hover:-translate-y-px hover:shadow-md",
         s.card,
       )}
     >
-      <div className="flex items-center gap-3 border-b border-black/[0.04] px-4 py-3.5 sm:px-5">
+      <div className="flex items-center gap-2 border-b border-black/[0.04] px-3 py-2 sm:px-3.5">
         <div
           className={cn(
-            "flex size-10 shrink-0 items-center justify-center rounded-xl [&_svg]:size-5",
+            "flex size-8 shrink-0 items-center justify-center rounded-lg [&_svg]:size-[1.1rem]",
             s.iconWrap,
           )}
         >
           <PanelIcon strokeWidth={2.25} aria-hidden />
         </div>
-        <h3 className="min-w-0 flex-1 text-base font-semibold tracking-tight text-foreground">
+        <h3 className="min-w-0 flex-1 text-sm font-semibold tracking-tight text-foreground">
           {title}
         </h3>
         <Badge
@@ -226,28 +221,28 @@ function PredictionPanelCard({
           {count}
         </Badge>
       </div>
-      <div className="px-4 pb-4 pt-3 sm:px-5">
+      <div className="px-3 pb-3 pt-2 sm:px-3.5">
         <div
-          className="overflow-y-auto pr-1 [scrollbar-gutter:stable]"
-          style={scrollBoxStyle(scrollMinH, 48)}
+          className="icd-scrollbar overflow-y-scroll pr-1"
+          style={scrollBoxStyle(scrollMinH, 40)}
         >
           {codes.length === 0 ? (
-            <p className="py-6 text-center text-sm text-muted-foreground">{empty}</p>
+            <p className="py-4 text-center text-xs text-muted-foreground">{empty}</p>
           ) : (
-            <ul className="space-y-3">
+            <ul className="space-y-2">
               {codes.map((c) => {
                 const { chip, desc } = splitCodeParts(maps, c);
                 return (
-                  <li key={c} className="flex gap-3 text-sm leading-snug">
+                  <li key={c} className="flex gap-2 text-xs leading-snug sm:text-[13px]">
                     <span
                       className={cn(
-                        "flex min-h-[2rem] min-w-[2.75rem] shrink-0 items-center justify-center rounded-lg px-2 py-1 text-center text-xs font-bold tabular-nums tracking-tight",
+                        "flex min-h-[1.75rem] min-w-[2.5rem] shrink-0 items-center justify-center rounded-md px-1.5 py-0.5 text-center text-[10px] font-bold tabular-nums tracking-tight sm:text-xs",
                         s.chip,
                       )}
                     >
                       {chip}
                     </span>
-                    <span className="pt-1 text-[13px] text-foreground/90">
+                    <span className="pt-0.5 text-xs text-foreground/90 sm:text-[13px]">
                       {desc || "(no description loaded)"}
                     </span>
                   </li>
@@ -257,40 +252,6 @@ function PredictionPanelCard({
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-function RefMetric({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-}) {
-  return (
-    <div
-      className={cn(
-        "animate-in fade-in-0 zoom-in-95 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm duration-300",
-        "transition-transform hover:-translate-y-0.5 hover:shadow-md",
-      )}
-    >
-      <Tooltip>
-        <TooltipTrigger className="flex w-full cursor-help items-center gap-1.5 text-left">
-          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            {label}
-          </span>
-          <CircleHelp className="size-3.5 text-muted-foreground/80" />
-        </TooltipTrigger>
-        <TooltipContent side="bottom" className="max-w-xs text-xs leading-relaxed">
-          {hint}
-        </TooltipContent>
-      </Tooltip>
-      <p className="mt-3 text-3xl font-semibold tabular-nums tracking-tight text-foreground">
-        {value}
-      </p>
     </div>
   );
 }
@@ -312,7 +273,9 @@ export default function HomePage() {
   const [showFullNote, setShowFullNote] = useState(false);
   const [diagOpen, setDiagOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [instrTab, setInstrTab] = useState<"new" | "accumulated">("new");
+  const [instrTab, setInstrTab] = useState<
+    "new" | "accumulated" | "thinking"
+  >("new");
   const [diag, setDiag] = useState<{
     summary: unknown;
     logTail: string;
@@ -432,8 +395,6 @@ export default function HomePage() {
 
   const newInstructions = selected?.instructions ?? [];
 
-  const { prec, rec, f1 } = metricsFromCodes(predCodesSorted, gtCodesSorted);
-
   const patientTitle = patientTitleFromRow(row, patientIndex);
 
   const f1ByStep = useMemo(() => {
@@ -443,8 +404,7 @@ export default function HomePage() {
       const preds = rec
         ? [...new Set(rec.prediction.map(normalizeCode).filter(Boolean))].sort()
         : [];
-      const { f1: fv } = metricsFromCodes(preds, gtCodesSorted);
-      map.set(t, fv);
+      map.set(t, f1FromBucketOverlap(preds, gtCodesSorted));
     }
     return map;
   }, [byT, gtCodesSorted, stepKeys]);
@@ -529,11 +489,18 @@ export default function HomePage() {
   const m = maps ?? defaultMaps;
 
   const safePatientCap = Math.max(1, patientCount || 1);
-  const noteText = row
-    ? showFullNote
-      ? String(row.admission_note ?? "")
-      : extractNoteSummary(String(row.admission_note ?? ""), 10)
+  const admissionNoteRaw = row ? admissionNoteFromRow(row) : "";
+  const thinkBlockRaw = row
+    ? String(row.think_block ?? "").trim()
     : "";
+  const noteText =
+    !row
+      ? ""
+      : !admissionNoteRaw
+        ? ""
+        : showFullNote
+          ? admissionNoteRaw
+          : extractNoteSummary(admissionNoteRaw, 10);
 
   const canPrevPatient = patientIndex > 1;
   const canNextPatient = patientIndex < safePatientCap;
@@ -548,7 +515,7 @@ export default function HomePage() {
       key={id}
       onClick={() => setInstrTab(id)}
       className={cn(
-        "relative flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-medium transition-all duration-200 ease-out",
+        "relative flex flex-1 items-center justify-center gap-1 rounded-lg px-2 py-1.5 text-xs font-medium transition-all duration-200 ease-out",
         instrTab === id
           ? "bg-white text-foreground shadow-sm ring-1 ring-slate-200/80"
           : "text-muted-foreground hover:text-foreground",
@@ -565,70 +532,70 @@ export default function HomePage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100/80">
-      <div className="mx-auto max-w-6xl px-4 pb-16 pt-8 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-6xl px-3 pb-6 pt-4 sm:px-4 lg:px-6">
         <header className="animate-in fade-in-0 slide-in-from-top-2 duration-500">
-          <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
-            <div className="flex gap-3.5">
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-sky-100 shadow-sm ring-1 ring-sky-200/60 transition-transform duration-300 hover:scale-105">
-                <Activity className="size-6 text-sky-600" strokeWidth={2.2} />
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="flex gap-2.5">
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-sky-100 shadow-sm ring-1 ring-sky-200/60">
+                <Activity className="size-5 text-sky-600" strokeWidth={2.2} />
               </div>
               <div>
-                <h1 className="text-2xl font-bold tracking-tight text-foreground sm:text-3xl">
+                <h1 className="text-xl font-bold tracking-tight text-foreground sm:text-2xl">
                   Diagnosis Inference Dashboard
                 </h1>
-                <p className="mt-1 text-sm text-muted-foreground">
+                <p className="mt-0.5 text-xs text-muted-foreground">
                   Iterative ICD prediction · agent run viewer
                 </p>
               </div>
             </div>
 
-            <div className="flex flex-col items-stretch gap-3 sm:items-end">
-              <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+            <div className="flex flex-col items-stretch gap-1.5 sm:items-end">
+              <p className="text-[9px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
                 Currently viewing
               </p>
-              <h2 className="max-w-md text-left text-base font-semibold leading-snug text-foreground sm:max-w-sm sm:text-right">
+              <h2 className="max-w-md text-left text-sm font-semibold leading-snug text-foreground sm:max-w-sm sm:text-right">
                 {patientTitle}
               </h2>
-              <div className="flex items-center justify-end gap-2">
+              <div className="flex items-center justify-end gap-1.5">
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  className="h-9 gap-1 rounded-xl border-slate-200 bg-white px-3 shadow-sm transition-all duration-200 hover:bg-slate-50"
+                  className="h-8 gap-0.5 rounded-lg border-slate-200 bg-white px-2.5 text-xs shadow-sm"
                   disabled={!canPrevPatient}
                   onClick={() =>
                     setPatientIndex((i) => Math.max(1, i - 1))
                   }
                 >
-                  <ChevronLeft className="size-4" />
+                  <ChevronLeft className="size-3.5" />
                   Prev
                 </Button>
-                <span className="min-w-[4.5rem] text-center text-sm font-medium tabular-nums text-foreground">
+                <span className="min-w-[4rem] text-center text-xs font-medium tabular-nums text-foreground">
                   {patientIndex} / {safePatientCap}
                 </span>
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
-                  className="h-9 gap-1 rounded-xl border-slate-200 bg-white px-3 shadow-sm transition-all duration-200 hover:bg-slate-50"
+                  className="h-8 gap-0.5 rounded-lg border-slate-200 bg-white px-2.5 text-xs shadow-sm"
                   disabled={!canNextPatient}
                   onClick={() =>
                     setPatientIndex((i) => Math.min(safePatientCap, i + 1))
                   }
                 >
                   Next
-                  <ChevronRight className="size-4" />
+                  <ChevronRight className="size-3.5" />
                 </Button>
               </div>
             </div>
           </div>
 
-          <div className="mt-5 flex justify-end">
+          <div className="mt-2 flex justify-end">
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="gap-2 rounded-xl text-muted-foreground hover:text-foreground"
+              className="h-8 gap-1.5 rounded-lg px-2 text-xs text-muted-foreground hover:text-foreground"
               onClick={() => setSettingsOpen((o) => !o)}
             >
               <Settings2 className="size-4" />
@@ -746,37 +713,14 @@ export default function HomePage() {
           </Collapsible>
         </header>
 
-        <section className="mt-10 space-y-8">
-          {row ? (
-            <div
-              className={cn(
-                "flex gap-3 rounded-2xl border border-amber-200/70 bg-amber-50/90 px-4 py-3.5 shadow-sm",
-                "animate-in fade-in-0 slide-in-from-top-1 duration-300",
-              )}
-            >
-              <ShieldAlert
-                className="mt-0.5 size-5 shrink-0 text-amber-700"
-                strokeWidth={2}
-                aria-hidden
-              />
-              <div className="min-w-0">
-                <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-amber-900/75">
-                  Verifier stop reason
-                </p>
-                <p className="mt-1 break-words text-sm font-medium leading-snug text-foreground">
-                  {String(row.halt_reason ?? "—")}
-                </p>
-              </div>
-            </div>
-          ) : null}
-
+        <section className="mt-4 space-y-3">
           {!row || iterations.length === 0 ? (
             <Card className="border-dashed border-slate-300 shadow-sm">
-              <CardContent className="py-16 text-center">
-                <p className="text-muted-foreground">
+              <CardContent className="py-8 text-center">
+                <p className="text-sm text-muted-foreground">
                   No iteration records for this patient yet, or still loading.
                 </p>
-                <p className="mt-2 text-sm text-muted-foreground">
+                <p className="mt-1 text-xs text-muted-foreground">
                   Open <span className="font-medium">Run &amp; layout</span>{" "}
                   above to load a different W&amp;B run.
                 </p>
@@ -784,123 +728,131 @@ export default function HomePage() {
             </Card>
           ) : (
             <>
-              <div
-                className={cn(
-                  "animate-in fade-in-0 slide-in-from-bottom-2 rounded-2xl border border-slate-200/90 bg-white p-6 shadow-sm duration-500",
-                )}
-              >
-                <div className="relative flex justify-between gap-2 pt-2">
-                  <div
-                    className="pointer-events-none absolute left-[8%] right-[8%] top-5 h-px bg-slate-200"
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch sm:gap-3">
+                <div
+                  className={cn(
+                    "min-w-0 flex-1 rounded-xl border border-slate-200/90 bg-white px-3 py-2.5 shadow-sm",
+                    "animate-in fade-in-0 slide-in-from-bottom-2 duration-300",
+                  )}
+                >
+                  <div className="relative flex justify-between gap-1 pt-1">
+                    <div
+                      className="pointer-events-none absolute left-[8%] right-[8%] top-3.5 h-px bg-slate-200"
+                      aria-hidden
+                    />
+                    {stepKeys.map((t) => {
+                      const active = currentT === t;
+                      const f1s = f1ByStep.get(t);
+                      const stepNo = stepKeys.indexOf(t) + 1;
+                      return (
+                        <div
+                          key={t}
+                          className="relative z-10 flex min-w-0 flex-1 flex-col items-center"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => setCurrentT(t)}
+                            className={cn(
+                              "flex h-8 w-8 shrink-0 items-center justify-center rounded-full border-2 text-xs font-bold transition-all duration-200 ease-out",
+                              active
+                                ? "border-primary bg-primary text-primary-foreground shadow-sm ring-2 ring-primary/20"
+                                : "border-slate-200 bg-white text-slate-500 hover:border-primary/35 hover:text-foreground",
+                            )}
+                          >
+                            {stepNo}
+                          </button>
+                          <p
+                            className={cn(
+                              "mt-1 text-center text-[10px] font-semibold leading-tight transition-colors duration-200",
+                              active ? "text-foreground" : "text-muted-foreground",
+                            )}
+                          >
+                            Iter {stepNo}
+                            <span className="block font-normal text-[9px] text-muted-foreground/90">
+                              t={t}
+                            </span>
+                          </p>
+                          <p
+                            className={cn(
+                              "mt-0.5 text-center text-[10px] tabular-nums leading-none transition-colors duration-200",
+                              active ? "text-foreground" : "text-muted-foreground",
+                            )}
+                          >
+                            F1 {formatScore(f1s ?? null)}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-start gap-2 rounded-xl border border-amber-200/70 bg-amber-50/90 px-2.5 py-2 sm:w-[200px] sm:flex-col sm:justify-center">
+                  <ShieldAlert
+                    className="size-4 shrink-0 text-amber-700"
+                    strokeWidth={2}
                     aria-hidden
                   />
-                  {stepKeys.map((t) => {
-                    const active = currentT === t;
-                    const f1s = f1ByStep.get(t);
-                    const stepNo = stepKeys.indexOf(t) + 1;
-                    return (
-                      <div
-                        key={t}
-                        className="relative z-10 flex min-w-0 flex-1 flex-col items-center"
-                      >
-                        <button
-                          type="button"
-                          onClick={() => setCurrentT(t)}
-                          className={cn(
-                            "flex h-10 w-10 shrink-0 items-center justify-center rounded-full border-2 text-sm font-bold transition-all duration-200 ease-out",
-                            active
-                              ? "scale-110 border-primary bg-primary text-primary-foreground shadow-md ring-4 ring-primary/15"
-                              : "border-slate-200 bg-white text-slate-500 hover:scale-105 hover:border-primary/35 hover:text-foreground",
-                          )}
-                        >
-                          {stepNo}
-                        </button>
-                        <p
-                          className={cn(
-                            "mt-3 text-center text-xs font-semibold transition-colors duration-200",
-                            active ? "text-foreground" : "text-muted-foreground",
-                          )}
-                        >
-                          Iteration {stepNo}
-                          <span className="block font-normal text-[10px] text-muted-foreground/90">
-                            t={t}
-                          </span>
-                        </p>
-                        <p
-                          className={cn(
-                            "mt-0.5 text-center text-[11px] tabular-nums transition-colors duration-200",
-                            active ? "text-foreground" : "text-muted-foreground",
-                          )}
-                        >
-                          F1 {formatScore(f1s ?? null)}
-                        </p>
-                      </div>
-                    );
-                  })}
+                  <div className="min-w-0">
+                    <p className="text-[9px] font-bold uppercase tracking-wide text-amber-900/75">
+                      Stop reason
+                    </p>
+                    <p className="mt-0.5 break-words text-xs font-medium leading-snug text-foreground">
+                      {String(row.halt_reason ?? "—")}
+                    </p>
+                  </div>
                 </div>
               </div>
 
-              <div className="grid gap-4 sm:grid-cols-3">
-                <RefMetric
-                  label="Precision"
-                  value={formatScore(prec)}
-                  hint="TP / (TP + FP) at the selected iteration using 3-char ICD buckets."
-                />
-                <RefMetric
-                  label="Recall"
-                  value={formatScore(rec)}
-                  hint="TP / (TP + FN) at the selected iteration."
-                />
-                <RefMetric
-                  label="F1 score"
-                  value={formatScore(f1)}
-                  hint="Harmonic mean of precision and recall for this timestep."
-                />
-              </div>
-
-              <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-12 lg:gap-8">
+              <div className="grid grid-cols-1 items-start gap-3 lg:grid-cols-12 lg:gap-4">
                 <div
                   className={cn(
                     "animate-in fade-in-0 slide-in-from-bottom-2 lg:col-span-7 xl:col-span-7",
-                    "rounded-2xl border border-slate-200/90 bg-white shadow-sm duration-500",
+                    "rounded-xl border border-slate-200/90 bg-white shadow-sm duration-500",
                     "transition-shadow hover:shadow-md",
                   )}
                 >
-                  <div className="flex flex-wrap items-center gap-3 border-b border-slate-100 px-5 py-4">
-                    <div className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-sky-100 ring-1 ring-sky-200/60">
+                  <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 px-3 py-2">
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-sky-100 ring-1 ring-sky-200/60">
                       <FileText
-                        className="size-[1.35rem] text-sky-600"
+                        className="size-4 text-sky-600"
                         strokeWidth={2}
                         aria-hidden
                       />
                     </div>
-                    <h3 className="flex-1 text-lg font-semibold tracking-tight">
+                    <h3 className="flex-1 text-sm font-semibold tracking-tight sm:text-base">
                       Admission note
                     </h3>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5">
                       <Checkbox
                         id="full-note"
                         checked={showFullNote}
                         onCheckedChange={(c) => setShowFullNote(c === true)}
                       />
-                      <Label htmlFor="full-note" className="text-sm font-normal">
+                      <Label htmlFor="full-note" className="text-xs font-normal sm:text-sm">
                         Full note
                       </Label>
                     </div>
                   </div>
-                  <div className="px-5 py-5">
+                  <div className="px-3 py-2">
                     <div
-                      className="overflow-y-auto rounded-xl border border-slate-100 bg-white [scrollbar-gutter:stable]"
-                      style={scrollBoxStyle(heights.note, 80)}
+                      className="overflow-y-auto rounded-lg border border-slate-100 bg-white [scrollbar-gutter:stable]"
+                      style={scrollBoxStyle(heights.note, 56)}
                     >
-                      <p className="whitespace-pre-wrap px-4 py-4 font-mono text-[13px] leading-relaxed text-foreground">
-                        {noteText || "(empty note)"}
-                      </p>
+                      {noteText ? (
+                        <p className="whitespace-pre-wrap px-3 py-2 font-mono text-xs leading-relaxed text-foreground sm:text-[13px]">
+                          {noteText}
+                        </p>
+                      ) : (
+                        <p className="px-3 py-2 text-xs leading-relaxed text-muted-foreground sm:text-sm">
+                          {row && !admissionNoteRaw
+                            ? NO_ADMISSION_IN_TABLE_MSG
+                            : "(empty note)"}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-4 lg:col-span-5 xl:col-span-5">
+                <div className="flex flex-col gap-2 lg:col-span-5 xl:col-span-5">
                   <PredictionPanelCard
                     kind="tp"
                     title="True Predictions"
@@ -908,7 +860,7 @@ export default function HomePage() {
                     codes={tpCodes}
                     maps={m}
                     empty="No true positives at this iteration."
-                    scrollMinH={Math.max(118, Math.floor(heights.list * 0.36))}
+                    scrollMinH={Math.max(96, Math.floor(heights.list * 0.28))}
                   />
                   <PredictionPanelCard
                     kind="fp"
@@ -917,7 +869,7 @@ export default function HomePage() {
                     codes={fpCodes}
                     maps={m}
                     empty="No false positives."
-                    scrollMinH={Math.max(118, Math.floor(heights.list * 0.36))}
+                    scrollMinH={Math.max(96, Math.floor(heights.list * 0.28))}
                   />
                   <PredictionPanelCard
                     kind="fn"
@@ -926,12 +878,13 @@ export default function HomePage() {
                     codes={fnCodes}
                     maps={m}
                     empty="No false negatives."
-                    scrollMinH={Math.max(118, Math.floor(heights.list * 0.36))}
+                    scrollMinH={Math.max(96, Math.floor(heights.list * 0.28))}
                   />
                 </div>
               </div>
 
-              <div className="mt-6 lg:mt-8">
+              {/* Ground truth panel — hidden for a denser layout; TP/FP/FN still use GT internally.
+              <div className="mt-3 lg:mt-4">
                 <PredictionPanelCard
                   kind="gt"
                   title="Ground truth"
@@ -939,61 +892,75 @@ export default function HomePage() {
                   codes={gtCodesSorted}
                   maps={m}
                   empty="No ground-truth codes parsed for this row."
-                  scrollMinH={Math.max(160, heights.list)}
+                  scrollMinH={Math.max(120, heights.list)}
                 />
               </div>
+              */}
 
               <div
                 className={cn(
-                  "animate-in fade-in-0 slide-in-from-bottom-2 rounded-2xl border border-slate-200/90 bg-white p-5 shadow-sm duration-500",
+                  "animate-in fade-in-0 slide-in-from-bottom-2 rounded-xl border border-slate-200/90 bg-white p-3 shadow-sm duration-500",
                 )}
               >
-                <div className="mb-4">
-                  <h3 className="text-lg font-semibold tracking-tight">
+                <div className="mb-2">
+                  <h3 className="text-sm font-semibold tracking-tight sm:text-base">
                     Agent instructions
                   </h3>
-                  <p className="text-xs text-muted-foreground">
-                    Verifier bullets parsed from the think-block for each
-                    timestep.
+                  <p className="text-[11px] text-muted-foreground">
+                    {instrTab === "thinking"
+                      ? "Raw think_block text from the logged W&B row (not the parsed bullet list)."
+                      : "Verifier bullets parsed from the think-block for each timestep."}
                   </p>
                 </div>
-                <div className="flex rounded-2xl bg-slate-100/90 p-1 ring-1 ring-slate-200/60">
-                  {tabBtn("new", "New this iteration", newInstructions.length)}
-                  {tabBtn(
-                    "accumulated",
-                    "All accumulated",
-                    cumulativeInstructions.length,
-                  )}
+                <div className="flex rounded-xl bg-slate-100/90 p-0.5 ring-1 ring-slate-200/60">
+                  {tabBtn("new", "New", newInstructions.length)}
+                  {tabBtn("accumulated", "All", cumulativeInstructions.length)}
+                  {tabBtn("thinking", "Thinking")}
                 </div>
                 <div
                   key={instrTab}
-                  className="animate-in fade-in-0 zoom-in-95 mt-6 duration-200"
+                  className="animate-in fade-in-0 zoom-in-95 mt-3 duration-200"
                 >
-                  {instrTab === "new" ? (
-                    <ul className="space-y-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-4">
+                  {instrTab === "thinking" ? (
+                    <div
+                      className="overflow-y-auto rounded-lg border border-slate-100 bg-slate-50/40 p-3 [scrollbar-gutter:stable]"
+                      style={scrollBoxStyle(Math.max(120, heights.list), 72)}
+                    >
+                      {thinkBlockRaw ? (
+                        <pre className="whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground">
+                          {thinkBlockRaw}
+                        </pre>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          (empty think_block for this row)
+                        </p>
+                      )}
+                    </div>
+                  ) : instrTab === "new" ? (
+                    <ul className="space-y-1.5 rounded-lg border border-slate-100 bg-slate-50/40 p-3">
                       {newInstructions.length === 0 ? (
-                        <li className="text-sm text-muted-foreground">
+                        <li className="text-xs text-muted-foreground">
                           (none for this iteration)
                         </li>
                       ) : (
                         newInstructions.map((t, i) => (
-                          <li key={`${i}-${t.slice(0, 28)}`} className="flex gap-2 text-sm">
-                            <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-sky-400" />
+                          <li key={`${i}-${t.slice(0, 28)}`} className="flex gap-2 text-xs sm:text-sm">
+                            <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-sky-400" />
                             {t}
                           </li>
                         ))
                       )}
                     </ul>
                   ) : (
-                    <ul className="space-y-2.5 rounded-xl border border-slate-100 bg-slate-50/40 p-4">
+                    <ul className="space-y-1.5 rounded-lg border border-slate-100 bg-slate-50/40 p-3">
                       {cumulativeInstructions.length === 0 ? (
-                        <li className="text-sm text-muted-foreground">
+                        <li className="text-xs text-muted-foreground">
                           (none yet through this timestep)
                         </li>
                       ) : (
                         cumulativeInstructions.map((t, i) => (
-                          <li key={`${i}-${t.slice(0, 28)}`} className="flex gap-2 text-sm">
-                            <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-amber-400/90" />
+                          <li key={`${i}-${t.slice(0, 28)}`} className="flex gap-2 text-xs sm:text-sm">
+                            <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-amber-400/90" />
                             {t}
                           </li>
                         ))
@@ -1003,14 +970,14 @@ export default function HomePage() {
                 </div>
               </div>
 
-              <p className="text-center text-xs text-muted-foreground">
+              <p className="text-center text-[10px] text-muted-foreground sm:text-xs">
                 Tip: use ← / → arrow keys to step through iterations.
               </p>
             </>
           )}
         </section>
 
-        <Collapsible open={diagOpen} onOpenChange={setDiagOpen} className="mt-12">
+        <Collapsible open={diagOpen} onOpenChange={setDiagOpen} className="mt-6">
           <Card className="border-slate-200/90 shadow-sm">
             <CardHeader className="flex-row items-center justify-between space-y-0 pb-3">
               <div>

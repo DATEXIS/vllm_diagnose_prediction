@@ -11,6 +11,9 @@ import {
 import { fetchRunFromWandb } from "@/lib/pythonFetch";
 import { readSampleRecords } from "@/lib/sampleTable";
 
+/** Do not prerender: needs `UI/py`, cache dirs, and optional W&B at request time (Docker builder has only `.next` inputs). */
+export const dynamic = "force-dynamic";
+
 function defaultRunReady(uiRoot: string): boolean {
   const dir = path.join(uiRoot, "wandb_cache", DEFAULT_RUN_ID);
   return fs.existsSync(path.join(dir, "wandb-summary.json"));

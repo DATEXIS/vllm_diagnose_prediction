@@ -49,3 +49,65 @@ spec:
     - protocol: TCP
       port: 3000
       targetPort: 3000
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: merlin-ui-basic-auth
+  namespace: yxsg9647
+type: Opaque
+stringData:
+  auth: "chaiPeeteHueCoder:$2y$10$wYefo9VXss8LEZLj/aPltOQpDlLYMqmFTaBq2h9UtCq4D11VgszZq"
+---
+# Ingress: pick ONE style for your namespace.
+# Restricted (default): host must be *.project.ris.bht-berlin.de, HTTP only, reachable from BHT/VPN only.
+# Standard (on request): ask admins to whitelist namespace; then use a *.demo.datexis.com (etc.) host + TLS below.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: merlin-ui
+  namespace: yxsg9647
+  annotations:
+    # BHT campus + VPN client ranges (cluster ingress docs). Blocks the public internet even if DNS is reachable.
+    nginx.ingress.kubernetes.io/whitelist-source-range: "141.64.0.0/16,2001:638:812::/48,10.0.0.0/8"
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: merlin-ui-basic-auth
+    nginx.ingress.kubernetes.io/auth-realm: "MERLIN replay - auth required"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: merlin-ui-yxsg9647.project.ris.bht-berlin.de
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: merlin-ui
+                port:
+                  number: 3000
+# --- Standard mode (uncomment after namespace is whitelisted; set host + secretName uniquely):
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: merlin-ui-public
+#   namespace: yxsg9647
+#   annotations:
+#     cert-manager.io/cluster-issuer: letsencrypt
+# spec:
+#   ingressClassName: nginx
+#   rules:
+#     - host: merlin-ui.demo.datexis.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: merlin-ui
+#                 port:
+#                   number: 3000
+#   tls:
+#     - hosts:
+#         - merlin-ui.demo.datexis.com
+#       secretName: merlin-ui-demo-tls

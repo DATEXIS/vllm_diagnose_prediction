@@ -106,6 +106,8 @@ def log_sample_table(df: pd.DataFrame, n_samples: int | None = None) -> None:
 
     If ``n_samples`` is ``None``, every row is logged. Otherwise only the first
     ``n_samples`` rows (legacy dev default was 30).
+
+    Replay UI: keep ``admission_note`` in ``df`` when present — do not drop it.
     """
     log_df = df.drop(columns=['hadm_id', 'subject_id', 'discharge_note'], errors="ignore")
     out = log_df if n_samples is None else log_df.head(n_samples)
