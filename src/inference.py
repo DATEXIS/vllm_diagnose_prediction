@@ -120,6 +120,103 @@ async def run_inference(config: dict, prompts: List[str], schema: Optional[Dict[
         
     return extract_text_from_responses(responses)
 
+def build_payload_from_messages(
+    config: dict,
+    messages: List[Dict[str, Any]],
+    schema: Optional[Dict[str, Any]] = None,
+) -> dict:
+    """Build a vLLM payload from a pre-constructed messages list.
+
+    Mirrors build_payload but accepts an explicit messages list instead of a
+    flat prompt string + optional system_prompt. Used by the Generator so it
+    can send system / user / assistant roles separately.
+    """
+    model_name = config['model']['name']
+    inf_cfg = config['inference']
+
+    payload = {
+        "model": model_name,
+        "temperature": inf_cfg.get('temperature', 0.2),
+        "max_tokens": inf_cfg.get('max_tokens', 2000),
+        "messages": messages,
+        "stream": False,
+    }
+
+    if "reasoning_budget" in inf_cfg:
+        payload["reasoning_budget"] = inf_cfg["reasoning_budget"]
+
+    if "repetition_penalty" in inf_cfg:
+        payload["repetition_penalty"] = inf_cfg["repetition_penalty"]
+
+    if inf_cfg.get('guided_decoding', False) and schema:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": schema,
+        }
+    return payload
+
+
+def build_coroutine_from_messages(
+    session: ClientSession,
+    config: dict,
+    url: str,
+    messages: List[Dict[str, Any]],
+    schema: Optional[Dict[str, Any]] = None,
+):
+    """Return an async coroutine factory for a single messages-list request."""
+    payload = build_payload_from_messages(config, messages, schema)
+    headers = {"Content-Type": "application/json"}
+
+    async def request_coro():
+        async with session.post(url, json=payload, headers=headers) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise RuntimeError(f"Request failed with status {response.status}: {text}")
+            return await response.json()
+
+    return request_coro
+
+
+async def run_inference_messages(
+    config: dict,
+    messages_list: List[List[Dict[str, Any]]],
+    schema: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Run concurrent inference from pre-built message lists.
+
+    Drop-in replacement for run_inference when the caller already has
+    role-separated messages (system / user / assistant) rather than a flat
+    prompt string. Used by the Generator to send proper chat roles and to
+    pre-fill the assistant turn with the <coding_review> block.
+    """
+    job_name = config.get('job_name', 'default')
+    namespace = config.get('k8s', {}).get('namespace', 'default')
+
+    api_base = config['model'].get('api_base')
+    if not api_base:
+        api_base = f"http://vllm-server-{job_name}.{namespace}.svc.cluster.local/v1"
+
+    await check_connection(api_base)
+
+    url = f"{api_base}/chat/completions"
+    concurrency = config['inference'].get('concurrency', 10)
+
+    if len(messages_list) > 1:
+        logger.info(
+            f"Starting inference with concurrency={concurrency} for {len(messages_list)} prompts..."
+        )
+
+    async with ClientSession(timeout=ClientTimeout(total=None)) as session:
+        coroutines = [
+            build_coroutine_from_messages(session, config, url, messages, schema)
+            for messages in messages_list
+        ]
+        coros_with_prompts = list(zip(coroutines, messages_list))
+        responses = await gather_with_concurrency(concurrency, coros_with_prompts)
+
+    return extract_text_from_responses(responses)
+
+
 async def run_inference_with_system(
     config: dict,
     prompts: List[str],

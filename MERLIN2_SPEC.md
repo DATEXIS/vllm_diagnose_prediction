@@ -47,7 +47,7 @@
 * **Embedding model:** **PubMedBERT** (`microsoft/BiomedNLP-PubMedBERT-base-uncased-abstract-fulltext` or equivalent S-PubMedBERT variant) for both admission notes and instruction `description`/`quote` fields.
 * **Inputs at construction time:** the persistent instructions list (from `instructions.parquet`), the per-code stats lookup (from `code_stats.parquet`), and the cooccurrence index (from `cooccurrence.parquet`, see *Cooccurrence Index* below).
 * **Three retrieval paths, all OR'd at the per-instruction level:**
-  * **Semantic path:** embed the admission note, fetch persistent instructions whose `description`/`quote` embedding has cosine similarity ≥ `sim_threshold`.
+  * **Semantic path:** embed the admission note, fetch persistent instructions whose `description`/`quote` embedding has cosine similarity ≥ `sim_note_threshold`.
   * **FP gate (threshold, runtime-synthesised):** for each 3-digit code in the *previous iteration's* prediction, look up `code_stats[code].fpr`. If it is ≥ `fpr_threshold`, synthesise an `fp_warning` Instruction at retrieval time and emit it. Synthesised IDs are deterministic (md5 hash of `"fp_<code>"`, high-bit set) so the same warning keeps the same ID across iterations.
   * **FN gate (threshold, runtime-synthesised, cooccurrence-driven):** expand the previous prediction via the cooccurrence index — for each predicted code, take the top-`cooccurrence_top_k` codes with `lift ≥ cooccurrence_threshold`. For each candidate in that expanded set, look up `code_stats[code].fnr`. If it is ≥ `fnr_threshold`, synthesise an `fn_warning` Instruction. The asymmetry with the FP gate is deliberate: an FN warning is about a code the model *should have* predicted but didn't, so gating on the predicted set would make it unreachable.
   * Both threshold gates are inactive at `t=0` (no prior prediction yet).
@@ -236,7 +236,8 @@ Tuned empirically from here; locked in as the first run's config.
 
 | Parameter | Value | Used by |
 |---|---|---|
-| `sim_threshold` | 0.8 | Retriever — semantic path (cosine similarity cutoff) |
+| `sim_note_threshold` | 0.8 | Retriever — note-section semantic path (cosine similarity cutoff) |
+| `sim_icd_threshold` | 0.8 | Retriever — ICD-reason semantic path (cosine similarity cutoff; set lower than `sim_note_threshold` to admit more ICD-driven retrievals) |
 | `fpr_threshold` | 0.5 | Retriever — FP gate (synthesise fp_warning when `code_stats[c].fpr ≥ this`) |
 | `fnr_threshold` | 0.5 | Retriever — FN gate (synthesise fn_warning when `code_stats[c].fnr ≥ this`) |
 | `min_support` | 3 | Meta-Verifier — minimum case count before a code is eligible for a `code_stats` row |
@@ -262,7 +263,7 @@ Every retrieval event must be logged with enough detail to later tune the thresh
 * Halting reason (one of `max_iterations`, `budget_exhausted`, `no_new_instructions`, `convergence`, `empty_db`, `parse_failure`)
 * `delta_F1` and the resulting score update (`delta_F1 * rareness_factor * learning_rate`) — training only, applied only to persistent (non-threshold) instructions
 
-These logs are the basis for later adjusting `sim_threshold`, `fpr_threshold`, `fnr_threshold`, and `learning_rate` — in particular, if one retrieval path dominates or never fires, the thresholds are mis-tuned.
+These logs are the basis for later adjusting `sim_note_threshold`, `sim_icd_threshold`, `fpr_threshold`, `fnr_threshold`, and `learning_rate` — in particular, if one retrieval path dominates or never fires, the thresholds are mis-tuned.
 
 ### Storage
 
@@ -279,7 +280,8 @@ Re-evaluation candidates for the instruction store (open question): SQLite for c
 For each persistent semantic / contrastive instruction `i`:
 
 ```
-fire i IF cosine(note_embedding, i.embedding) >= sim_threshold
+fire i IF cosine(note_embedding, i.embedding) >= sim_note_threshold      # note-section path
+fire i IF cosine(reason_embedding, i.embedding) >= sim_icd_threshold    # ICD-reason path
 ```
 
 For each 3-digit code `c` in the previous prediction:

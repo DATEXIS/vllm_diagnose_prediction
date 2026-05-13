@@ -35,6 +35,8 @@ from src.prompter import ICDPrediction, ICDsModel
 logger = logging.getLogger(__name__)
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+# Matches an unclosed <think> block — model ran out of tokens mid-thinking.
+_THINK_OPEN_RE = re.compile(r"<think>.*$", re.DOTALL)
 
 
 class JSONExtractionError(ValueError):
@@ -43,8 +45,17 @@ class JSONExtractionError(ValueError):
 
 # --------------------------------------------------------------- stripping
 def _strip_think_blocks(text: str) -> str:
-    """Remove <think>…</think> sections emitted by reasoning models."""
-    return _THINK_BLOCK_RE.sub("", text).strip()
+    """Remove <think>…</think> sections emitted by reasoning models.
+
+    Also strips unclosed <think> blocks (model hit max_tokens during thinking
+    and never emitted </think>). Without this, a response that is entirely
+    an incomplete think block is passed as-is to the JSON extractors, which
+    then fail on the raw <think> text.
+    """
+    # Strip complete blocks first, then any trailing unclosed one.
+    text = _THINK_BLOCK_RE.sub("", text)
+    text = _THINK_OPEN_RE.sub("", text)
+    return text.strip()
 
 
 # --------------------------------------------------------------- extractors

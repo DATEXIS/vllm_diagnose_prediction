@@ -10,10 +10,10 @@ Root Cause Analysis (RCA) on ICD-10 predictions made by another model.
 clinical picture used as the source of truth alongside the labeled codes.
 {discharge_note}
 
-3. **Predicted ICD codes** (3-digit, the prediction model's final answer):
+3. **Predicted ICD codes** (full ICD codes, the prediction model's final answer):
 {predicted_codes}
 
-4. **Ground-truth ICD codes** (3-digit, from MIMIC-IV):
+4. **Ground-truth ICD codes** (full ICD codes, from MIMIC-IV):
 {ground_truth_codes}
 
 5. **Case identifier**:
@@ -55,6 +55,25 @@ codes) write one entry of type RichErrorInstruction.
   the case-level path produces. Aggregate FP/FN warnings live in a
   separate per-code statistics table and are synthesised at retrieval
   time — do not emit them here.
+
+- Pick `action` from: add, remove.
+  * `add`    — the instruction corrects a missed code (FN); the Generator
+               should include the target code(s) if the described cue is present.
+  * `remove` — the instruction corrects a hallucinated code (FP); the Generator
+               should drop the target code(s) if the described cue is absent.
+  For contrastive_swap entries, set action to `remove` for the code being
+  dropped and `add` for the code being added — or emit two separate entries
+  if that is clearer. A single contrastive_swap entry may set action=`add`
+  when it is primarily about which specific subcode to prefer.
+
+- `section` must be one of the known admission note section names:
+  CHIEF COMPLAINT, PRESENT ILLNESS, MEDICAL HISTORY,
+  MEDICATION ON ADMISSION, ALLERGIES, PHYSICAL EXAM,
+  FAMILY HISTORY, SOCIAL HISTORY.
+  Use `icd_reasoning` only when the instruction is grounded purely in
+  code-level reasoning (e.g. a contrastive swap between two similar
+  codes) with no specific section cue in the admission note. Do not
+  invent other section names.
 
 ### Output
 

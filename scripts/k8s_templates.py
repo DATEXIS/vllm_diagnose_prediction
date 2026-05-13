@@ -45,6 +45,7 @@ spec:
               memory: "{{ cfg.k8s.server.memory_limit }}"
             requests:
               nvidia.com/gpu: "{{ cfg.k8s.server.gpu_count }}"
+              memory: "128Gi"
           volumeMounts:
             - name: dshm
               mountPath: /dev/shm
@@ -121,11 +122,17 @@ spec:
                   key: api-key
           resources:
             limits:
+              nvidia.com/gpu: "1"
               memory: "{{ cfg.k8s.client.memory_limit }}"
+            requests:
+              nvidia.com/gpu: "1"
+              memory: "16Gi"
       volumes:
         - name: config
           configMap:
             name: diagnose-config-{{ cfg.job_name }}
+      nodeSelector:
+        gpu: {{ cfg.k8s.client.gpu_type }}
       imagePullSecrets:
         - name: {{ cfg.k8s.image_pull_secrets }}
       restartPolicy: Never

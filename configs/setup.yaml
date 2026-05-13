@@ -10,7 +10,7 @@ docker:
   server_image: "vllm/vllm-openai:v0.19.1"
 
 wandb:
-  project: "ICD-prediction"
+  project: "Merlin2"
   entity: "datexis-phd"
 
 k8s:

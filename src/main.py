@@ -115,17 +115,21 @@ async def main_async(config: dict) -> None:
 
     df = df.copy()
     df["predictions"] = [r.final_prediction.model_dump_json() for r in results]
-    df["raw_response"] = [r.final_raw_response for r in results]
+    if not config["inference"].get("guided_decoding", "true"):
+        df["raw_response"] = [r.final_raw_response for r in results]
     df["iterations"] = [r.iterations for r in results]
     df["halt_reason"] = [r.halt_reason for r in results]
     # The non-think-block parts of the prompt (system + admission note +
     # JSON example) are constant across iterations, so we only log the
     # final iteration's think block — that's where the per-iteration
     # variation actually lives.
-    df["think_block_final"] = [
+    df["think_block"] = [
         r.history.think_blocks[-1] if r.history.think_blocks else "" for r in results
     ]
-    df["instructions"] = [r.history.think_blocks for r in results]
+    # Per-iteration retrieval detail: which instructions fired, via which
+    # path, at what confidence.  Replaces the old `instructions` column
+    # (which was a raw list of think-block strings — hard to read in wandb).
+    df["retrieval_log"] = [_format_retrieval_log(r) for r in results]
 
     # ------------------------------------------------------------------ Eval
     df_results = None
@@ -134,11 +138,17 @@ async def main_async(config: dict) -> None:
         wandb_logger.log_metrics(metrics)
         wandb_logger.log_sample_table(df_results)
 
+
         # Per-iteration F1 trace (training only — when ground truth is present)
         if ground_truth is not None:
             per_iter = _per_iteration_metrics(results, ground_truth)
             if per_iter:
                 wandb_logger.log_per_iteration_metrics(per_iter)
+
+        # Final run-level summary metrics — logged after per-iteration metrics
+        # so wandb summary reflects the true final-prediction quality across
+        # all samples (not just those that reached the last iteration wave).
+        wandb_logger.log_metrics(metrics)
 
         # ICD count metrics
         wandb_logger.log_icd_counts(
@@ -166,6 +176,14 @@ async def main_async(config: dict) -> None:
 
     # ------------------------------------------------------------ Loop B
     mv_cfg = config.get("meta_verifier", {})
+    if mv_cfg.get("enabled", False):
+        if df_results is None:
+            logger.warning(
+                "Meta-Verifier is enabled but skipped: evaluation results are "
+                "unavailable (ground truth required). Check that '%s' column "
+                "exists in the data file.",
+                target_col,
+            )
     if mv_cfg.get("enabled", False) and df_results is not None:
         df_for_audit = df_results.copy()
         df_for_audit["pred_codes"] = df_for_audit["parsed_predictions"].apply(
@@ -257,6 +275,7 @@ def _per_iteration_metrics(
 
         # Setting 1: all samples that have a prediction at iteration t
         y_pred_all, y_true_all = [], []
+        parse_failures_at_t = 0
         for r, truth in zip(results, ground_truth):
             if t < len(r.history.predictions):
                 y_pred_all.append(
@@ -264,8 +283,17 @@ def _per_iteration_metrics(
                      if normalize_icd(d.icd_code)]
                 )
                 y_true_all.append([normalize_icd(c) for c in truth if normalize_icd(c)])
+                # Count parse failures: case halted at t due to parse failure
+                if (
+                    r.halt_reason == "parse_failure"
+                    and len(r.history.predictions) - 1 == t
+                ):
+                    parse_failures_at_t += 1
         if y_pred_all:
-            entry["all"] = _metrics_dict(calculate_metrics(y_true_all, y_pred_all))
+            m = _metrics_dict(calculate_metrics(y_true_all, y_pred_all))
+            m["parse_failures"] = parse_failures_at_t
+            m["n_samples"] = len(y_pred_all)
+            entry["all"] = m
 
         # Setting 2: samples whose final iteration is t
         # r.iterations == len(r.history.predictions), so the last index is
@@ -286,6 +314,18 @@ def _per_iteration_metrics(
     return out
 
 
+def _prf(true_codes: List[str], pred_codes: List[str]) -> tuple:
+    """Return (precision, recall, f1) for a single sample."""
+    t, p = set(true_codes), set(pred_codes)
+    if not t and not p:
+        return 1.0, 1.0, 1.0
+    tp = len(t & p)
+    precision = tp / len(p) if p else 0.0
+    recall = tp / len(t) if t else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    return precision, recall, f1
+
+
 def _flatten_retrieval_events(results: List[PipelineCaseResult]) -> pd.DataFrame:
     rows = []
     for r in results:
@@ -299,9 +339,124 @@ def _flatten_retrieval_events(results: List[PipelineCaseResult]) -> pd.DataFrame
                         "path": ev.path,
                         "trigger_value": ev.trigger_value,
                         "efficacy_score": ev.efficacy_score,
+                        "target_codes": ",".join(ev.target_codes),
+                        "trigger_codes": ",".join(ev.trigger_codes),
                     }
                 )
     return pd.DataFrame(rows)
+
+
+def _format_retrieval_log(result: PipelineCaseResult) -> str:
+    """Build a structured retrieval log for wandb inspection.
+
+    Layout:
+        True labels: A, B, C
+
+        T=0 (zero-shot): X1, Y1  R=0.50  P=0.67  F1=0.57
+        T=1: X2, Y2, Z2          R=0.67  P=0.80  F1=0.73
+        T=2 (final): X3, Y3, Z3  R=0.67  P=0.80  F1=0.73
+
+        --- Retrieved Instructions ---
+        T=1:
+          Missed codes (FNR):
+          * M33    fnr=1.00  co-occurs-with: Z82, K86
+          Rethink codes (FPR):
+          * B18    fpr=1.00
+          Semantic Similarity:
+          * [E11]  [note]  sim=0.85  "If the note mentions long-standing DM2..."
+
+    Predictions and their per-iteration scores appear first so you can scan
+    the outcome without wading through instruction text. Retrieved instructions
+    follow in a separate block.
+    """
+    from src.merlin2.retriever import THRESHOLD_FPR, THRESHOLD_FNR, is_semantic_path
+
+    true_codes = result.history.ground_truth_codes or []
+    true_str = ", ".join(sorted(true_codes)) if true_codes else "—"
+
+    lines: List[str] = [f"True labels: {true_str}", ""]
+
+    # ---- Part 1: all predictions with per-iteration P/R/F1 ----------------
+    n_preds = len(result.history.predictions)
+    for t, pred_model in enumerate(result.history.predictions):
+        pred_codes = [
+            normalize_icd(d.icd_code)
+            for d in pred_model.diagnoses
+            if normalize_icd(d.icd_code)
+        ]
+        pred_str = ", ".join(pred_codes) if pred_codes else "—"
+
+        labels = []
+        if t == 0:
+            labels.append("zero-shot")
+        if t == n_preds - 1 and n_preds > 1:
+            labels.append("final")
+        label_suffix = f" ({', '.join(labels)})" if labels else ""
+
+        if true_codes:
+            prec, rec, f1 = _prf(true_codes, pred_codes)
+            score_str = f"  R={rec:.2f}  P={prec:.2f}  F1={f1:.2f}"
+        else:
+            score_str = ""
+
+        lines.append(f"T={t}{label_suffix}: {pred_str}{score_str}")
+
+    # ---- Part 2: retrieved instructions, grouped by iteration --------------
+    retrieval_pairs = list(
+        zip(result.history.retrieval_events, result.history.instructions_used)
+    )
+    has_retrievals = any(events for events, _ in retrieval_pairs)
+
+    if has_retrievals:
+        lines.append("\n--- Retrieved Instructions ---")
+
+        for t, (events, instrs) in enumerate(retrieval_pairs):
+            if not events:
+                continue
+
+            ev_by_id = {ev.instruction_id: ev for ev in events}
+            fnr_lines: List[str] = []
+            fpr_lines: List[str] = []
+            sem_lines: List[str] = []
+
+            for instr in instrs:
+                ev = ev_by_id.get(instr.instruction_id)
+                if ev is None:
+                    continue
+                codes_tag = ", ".join(ev.target_codes) if ev.target_codes else "?"
+                snippet = (instr.instruction_text or "")[:90].replace("\n", " ")
+
+                if ev.path == THRESHOLD_FNR:
+                    cooccur = (
+                        f"  co-occurs-with: {', '.join(sorted(ev.trigger_codes))}"
+                        if ev.trigger_codes else ""
+                    )
+                    fnr_lines.append(
+                        f"  * {codes_tag:<6}  fnr={ev.trigger_value:.2f}{cooccur}"
+                    )
+                elif ev.path == THRESHOLD_FPR:
+                    fpr_lines.append(
+                        f"  * {codes_tag:<6}  fpr={ev.trigger_value:.2f}"
+                    )
+                elif is_semantic_path(ev.path):
+                    section_tag = ev.path.removeprefix("sem_")
+                    sem_lines.append(
+                        f"  * [{codes_tag}]  [{section_tag}]"
+                        f"  sim={ev.trigger_value:.2f}  \"{snippet}\""
+                    )
+
+            lines.append(f"\nT={t}:")
+            if fnr_lines:
+                lines.append("  Missed codes (FNR):")
+                lines.extend(fnr_lines)
+            if fpr_lines:
+                lines.append("  Rethink codes (FPR):")
+                lines.extend(fpr_lines)
+            if sem_lines:
+                lines.append("  Semantic Similarity:")
+                lines.extend(sem_lines)
+
+    return "\n".join(lines)
 
 
 def main() -> None:

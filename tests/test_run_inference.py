@@ -54,7 +54,8 @@ def base_config():
             "max_iterations": 3,
             "convergence_threshold": 0.9,
             "max_tokens_budget": 10_000,
-            "sim_threshold": 0.5,
+            "sim_note_threshold": 0.5,
+            "sim_icd_threshold": 0.5,
             "fpr_threshold": 0.5,
             "fnr_threshold": 0.5,
             "learning_rate": 1.0,
@@ -108,7 +109,7 @@ class TestHalts:
         # instruction; that way no single iteration retrieves them all
         # and dedup doesn't short-circuit.
         gen = _ScriptedGenerator([[["A"]], [["B"]], [["C"]]])
-        retriever = Retriever(sim_threshold=0.99, fpr_threshold=0.5)
+        retriever = Retriever(sim_note_threshold=0.99, sim_icd_threshold=0.99, fpr_threshold=0.5)
         retriever.load_instructions(
             [_fp_warning(1, "A"), _fp_warning(2, "B"), _fp_warning(3, "C")]
         )
@@ -124,7 +125,7 @@ class TestHalts:
     async def test_convergence(self, base_config):
         # Same prediction twice => Jaccard 1.0 => convergence at t=1.
         gen = _ScriptedGenerator([[["I10"]], [["I10"]]])
-        retriever = Retriever(sim_threshold=0.0)
+        retriever = Retriever(sim_note_threshold=0.0, sim_icd_threshold=0.0)
         retriever.load_instructions([_semantic_instr(1), _semantic_instr(2)])
         verifier = Verifier(max_iterations=5, max_tokens_budget=100_000, convergence_threshold=0.9)
 
@@ -138,7 +139,7 @@ class TestHalts:
         # Only one instruction in the bank; iteration 1 retrieves it, iteration 2
         # has nothing left after dedup => halt with NO_NEW_INSTRUCTIONS.
         gen = _ScriptedGenerator([[["I10"]], [["E11"]]])
-        retriever = Retriever(sim_threshold=0.0)
+        retriever = Retriever(sim_note_threshold=0.0, sim_icd_threshold=0.0)
         retriever.load_instructions([_semantic_instr(1)])
         verifier = Verifier(max_iterations=5, max_tokens_budget=100_000, convergence_threshold=0.99)
 
@@ -155,7 +156,7 @@ class TestEfficacyUpdate:
         # Instruction retrieved fresh at t=1 should get +1.0 * learning_rate * rareness.
         gen = _ScriptedGenerator([[["X"]], [["I10"]]])
         instr = _semantic_instr(1)
-        retriever = Retriever(sim_threshold=0.0)
+        retriever = Retriever(sim_note_threshold=0.0, sim_icd_threshold=0.0)
         retriever.load_instructions([instr])
         verifier = Verifier(max_iterations=3, max_tokens_budget=100_000, convergence_threshold=0.99)
 
