@@ -430,21 +430,25 @@ _SINGLE_QUERY_PROMPT = (
 )
 
 _MULTI_QUERY_PROMPT = (
-    "You rewrite clinical admission notes into exactly {n} diverse PubMed search queries.\n\n" 
-    "Generate the queries in this specific order:\n" 
-    "1. RARE/ATYPICAL diagnoses: Focus on uncommon conditions, unusual presentations, " 
-    "rare complications, or unexpected findings. This query should help find ICD codes " 
-    "that are rarely predicted.\n" 
-    "2. PRIMARY diagnoses and chief complaint with key clinical findings.\n" 
-    "3. COMORBIDITY INTERACTIONS: How the patient's multiple conditions interact, " 
-    "contraindications, drug interactions, or unusual combinations.\n\n" 
-    "Rules:\n" 
-    "- Query 1 must focus on rare/atypical aspects — this is the most important query.\n" 
-    "- Use only explicitly stated information.\n" 
-    "- Preserve negations (e.g., 'denies', 'no history of').\n" 
-    "- Use standard medical terminology and MeSH terms where possible.\n" 
-    "- Output exactly {n} numbered lines. No explanation.\n\n" 
-    "Admission note:\n{note}\n\n" 
+    "You are an expert clinical coding archivist. Your task is to rewrite a complex clinical admission note into exactly {n} distinct, highly specific search queries optimized for dense vector retrieval to map ICD-10 codes.\n\n" 
+    "Generate exactly {n} numbered queries. Each query must target a completely different clinical dimension of the chart to ensure no diagnoses are missed."
+
+    "Follow this structural breakdown for the queries:"
+    "1. [ACUTE PRIMARY]: Focus on the chief complaint, primary acute diagnosis, and the immediate reason for admission. Use highly specific medical terms."
+    "2. [CHRONIC COMORBIDITIES]: Focus entirely on the patient's underlying chronic conditions, historical illnesses, and routine medications (e.g., diabetes, renal status, cardiac history). Do NOT omit these just because they are common; they are critical for complete coding."
+    "3. [SPECIFICITY & MANIFESTATIONS]: Focus on localized manifestations, abnormal laboratory values, imaging findings, or complications that add numerical specificity (4th/5th digits) to the primary diagnosis."
+    "4. [LONG-TAIL & INDIRECT DIAGNOSES]: Focus exclusively on the rarest, most atypical findings, unexpected symptom combinations, or underlying etiologies mentioned in the note that could represent easily overlooked or secondary long-tail ICD codes."
+
+    "Rules: \n\n" 
+    "- Rely strictly on explicitly stated facts in the admission note. Do not assume or extrapolate.\n" 
+    "- Write each query as a dense string of clinical entities and medical phrases. \n" 
+    "- Avoid conversational language, preambles, or meta-explanations.\n" 
+    "- Preserve critical clinical negations (e.g., 'without hemorrhage', 'negative for ischemia') and temporality (acute vs. chronic).\n\n" 
+
+    "Output exactly {n} lines, each starting with its number and a period.\n\n" 
+
+    "Admission note:\n{note}\n\n"
+
     "Queries:"
 )
 
