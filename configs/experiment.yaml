@@ -19,7 +19,18 @@ inference:
 data:
   patients_file: "data/mimic/patients_1411.pq"
   target_col: "ICD_CODES"
-  sample_size: 10
+  sample_size: 10  # ignored when eval_slice.enabled is true
+
+  # Fixed evaluation slice for repeatable prompt/retrieval experiments
+  # On first run the slice is created and saved; subsequent runs load the saved file.
+  eval_slice:
+    enabled: true
+    path: "data/mimic/eval_slice.pq"
+    size: 25               # number of admission notes in the slice
+    seed: 42               # controls sampling — change only to create a new slice
+    source_split: "val"    # which MIMIC split to sample from: train / val / test / all
+    stratify_by: "complexity"  # note_length | complexity | random
+                               # complexity = note_length × ICD code count
 
 # Model configuration
 model:
@@ -52,8 +63,8 @@ rag:
     enabled: true  # rewrite admission notes into focused medical queries before retrieval
     n_queries: 3   # >1 generates diverse query variants covering different aspects of the note
   reranking:
-    enabled: false  # re-rank retrieved candidates with MedCPT-Cross-Encoder before trimming to top_k
-    fetch_k: 40    # candidates to fetch per query before re-ranking (should be > top_k)
+    enabled: true  # re-rank retrieved candidates with MedCPT-Cross-Encoder before trimming to top_k
+    fetch_k: 50    # candidates to fetch per query before re-ranking (should be > top_k)
 
 # Kubernetes cluster configuration
 k8s:
