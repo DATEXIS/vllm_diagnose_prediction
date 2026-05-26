@@ -52,7 +52,9 @@ class MetaVerifierConfig:
     fnr_threshold: float = 0.5
     min_support: int = 3
     temperature: float = 0.4
-    max_tokens: int = 8192
+    max_tokens: int = 2048
+    # Per-note char cap so admission + discharge + codes fit in max_model_len.
+    max_note_chars: int = 5000
 
 
 @dataclass
@@ -74,6 +76,14 @@ _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 def _strip_think_blocks(text: str) -> str:
     """Remove <think>…</think> sections emitted by reasoning models."""
     return _THINK_BLOCK_RE.sub("", text).strip()
+
+
+def _truncate_note(text: str, max_chars: int) -> str:
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n...[note truncated for context limit]"
 
 
 def _extract_json_list(text: str) -> List[dict]:
@@ -191,7 +201,8 @@ class MetaVerifier:
             fnr_threshold=cfg.get("fnr_threshold", merlin2_cfg.get("fnr_threshold", 0.5)),
             min_support=cfg.get("min_support", merlin2_cfg.get("min_support", 3)),
             temperature=cfg.get("temperature", 0.4),
-            max_tokens=cfg.get("max_tokens", 2000),
+            max_tokens=cfg.get("max_tokens", 2048),
+            max_note_chars=cfg.get("max_note_chars", 5000),
         )
         self._full_config = config or {}
 
@@ -357,9 +368,10 @@ class MetaVerifier:
         # Pass full ICD codes to the meta-verifier LLM so it has the
         # complete clinical specificity. Evaluation truncates to 3 digits,
         # but the audit prompt should not hide sub-code information.
+        limit = self.cfg.max_note_chars
         return load_prompt("meta_verifier").format(
-            admission_note=row["admission_note"],
-            discharge_note=row.get("discharge_note", "") or "",
+            admission_note=_truncate_note(str(row["admission_note"]), limit),
+            discharge_note=_truncate_note(str(row.get("discharge_note", "") or ""), limit),
             predicted_codes=", ".join(row["pred_codes"]),
             ground_truth_codes=", ".join(row["true_codes"]),
             hadm_id=row["hadm_id"],

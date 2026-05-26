@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 from typing import List
 
 import pandas as pd
@@ -27,7 +28,12 @@ from src.meta_verifier.code_stats import (
     save_code_stats,
 )
 from src.meta_verifier.meta_verifier import MetaVerifier
-from src.meta_verifier.store import append_instructions, load_instructions
+from src.meta_verifier.store import (
+    append_instructions,
+    load_instructions,
+    persist_efficacy_updates,
+)
+from src.utils.rareness import compute_rareness_factors
 from src.utils import wandb_logger
 
 logger = logging.getLogger(__name__)
@@ -47,22 +53,65 @@ def load_config(config_path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _ensure_columns(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
+def _merge_rareness_factors(df: pd.DataFrame, config: dict) -> pd.DataFrame:
+    """Attach rareness_factor from a sidecar parquet or compute from labels."""
+    m2_cfg = config.get("merlin2", {})
+    sidecar = m2_cfg.get("rareness_factors_path")
+    if sidecar:
+        p = Path(sidecar)
+        if p.exists():
+            rf = pd.read_parquet(p)
+            if "hadm_id" not in rf.columns or "rareness_factor" not in rf.columns:
+                raise KeyError(f"{sidecar} must have columns hadm_id, rareness_factor")
+            df = df.merge(rf[["hadm_id", "rareness_factor"]], on="hadm_id", how="left")
+            missing = df["rareness_factor"].isna().sum()
+            if missing:
+                raise ValueError(
+                    f"{missing} cases have no rareness_factor after merge with {sidecar}"
+                )
+            logger.info(f"Merged rareness_factor from {sidecar}")
+            return df
+        logger.warning(
+            "merlin2.rareness_factors_path=%s not found; falling back to "
+            "compute_rareness_at_load or 1.0. Build with: "
+            "python scripts/build_rareness_factors.py --config configs/experiment.yaml",
+            sidecar,
+        )
+
+    if m2_cfg.get("compute_rareness_at_load", False) and "true_codes" in df.columns:
+        factors = compute_rareness_factors(df["true_codes"].tolist())
+        df = df.copy()
+        df["rareness_factor"] = factors
+        logger.info(
+            "Computed rareness_factor at load (mean=%.3f, max=%.3f)",
+            sum(factors) / len(factors),
+            max(factors),
+        )
+        return df
+
+    if "rareness_factor" not in df.columns:
+        df = df.copy()
+        df["rareness_factor"] = 1.0
+        logger.warning(
+            "rareness_factor column missing; defaulting to 1.0. "
+            "Run scripts/build_rareness_factors.py for tail-weighted efficacy."
+        )
+    return df
+
+
+def _ensure_columns(df: pd.DataFrame, target_col: str, config: dict) -> pd.DataFrame:
     """Make sure the dataframe has the columns the pipeline expects."""
     if "admission_note" not in df.columns:
         raise KeyError("Patient file is missing 'admission_note' column.")
     if "hadm_id" not in df.columns:
         df = df.copy()
         df["hadm_id"] = df.index.astype(str)
-    if "rareness_factor" not in df.columns:
-        df = df.copy()
-        df["rareness_factor"] = 1.0
     if target_col in df.columns:
         df = df.copy()
         df["true_codes"] = df[target_col].apply(
             lambda v: [normalize_icd(c) for c in safe_parse_true_labels(v) if normalize_icd(c)]
         )
-    return df
+    return _merge_rareness_factors(df, config)
 
 
 async def main_async(config: dict) -> None:
@@ -70,7 +119,7 @@ async def main_async(config: dict) -> None:
     wandb_logger.log_parameters(config)
 
     target_col = config["data"].get("target_col", "ICD_CODES")
-    df = _ensure_columns(load_patients(config), target_col)
+    df = _ensure_columns(load_patients(config), target_col, config)
 
     # ----------------------------------------------- artifact roundtrip (download)
     m2_cfg = config.get("merlin2", {})
@@ -131,6 +180,30 @@ async def main_async(config: dict) -> None:
     # (which was a raw list of think-block strings — hard to read in wandb).
     df["retrieval_log"] = [_format_retrieval_log(r) for r in results]
 
+    # Persist Loop-A efficacy updates (training only; requires instruction store).
+    if ground_truth is not None and pipeline.retriever.persistent_instructions:
+        efficacy_by_id = {
+            i.instruction_id: i.efficacy_score
+            for i in pipeline.retriever.persistent_instructions
+        }
+        n_updated = persist_efficacy_updates(efficacy_by_id, instructions_path)
+        if n_updated:
+            wandb_logger.log_instructions_artifact(
+                artifact_name=instr_artifact_name,
+                local_path=instructions_path,
+            )
+
+    events_df = _flatten_retrieval_events(results)
+    if not events_df.empty:
+        events_path = m2_cfg.get(
+            "retrieval_events_path",
+            "data/retrieval_events_last.csv",
+        )
+        Path(events_path).parent.mkdir(parents=True, exist_ok=True)
+        events_df.to_csv(events_path, index=False)
+        logger.info(f"Wrote {len(events_df)} retrieval events to {events_path}")
+        wandb_logger.log_file_artifact("retrieval_events", "retrieval_log", events_path)
+
     # ------------------------------------------------------------------ Eval
     df_results = None
     if target_col in df.columns:
@@ -157,9 +230,9 @@ async def main_async(config: dict) -> None:
         )
 
         # Retrieval-event % per path type (line graph)
-        events_df = _flatten_retrieval_events(results)
         if not events_df.empty:
             wandb_logger.log_retrieval_type_pcts(events_df)
+            _log_retrieval_path_summary(events_df)
 
         out_path = (
             config["data"]
@@ -171,6 +244,7 @@ async def main_async(config: dict) -> None:
             out_path = "predictions.csv"
         df_results.to_csv(out_path, index=False)
         logger.info(f"Saved predictions to {out_path}")
+        wandb_logger.log_file_artifact("predictions", "predictions", out_path)
     else:
         logger.warning(f"Target column '{target_col}' not in data; skipping evaluation.")
 
@@ -324,6 +398,48 @@ def _prf(true_codes: List[str], pred_codes: List[str]) -> tuple:
     recall = tp / len(t) if t else 0.0
     f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
     return precision, recall, f1
+
+
+def _log_retrieval_path_summary(events_df: pd.DataFrame) -> None:
+    """Print path mix so you can see if semantic vs threshold retrieval fires."""
+    from src.merlin2.retriever import THRESHOLD_FPR, THRESHOLD_FNR, is_semantic_path
+
+    def _bucket(path: str) -> str:
+        if path == THRESHOLD_FPR:
+            return "threshold_fpr"
+        if path == THRESHOLD_FNR:
+            return "threshold_fnr"
+        if is_semantic_path(path):
+            return "semantic"
+        return "other"
+
+    events_df = events_df.copy()
+    events_df["bucket"] = events_df["path"].map(_bucket)
+    total = len(events_df)
+    by_bucket = events_df["bucket"].value_counts()
+    logger.info("Retrieval path mix (%d events):", total)
+    for bucket, count in by_bucket.items():
+        logger.info("  %s: %.1f%% (%d)", bucket, 100.0 * count / total, count)
+    if total > 0:
+        sem_pct = 100.0 * by_bucket.get("semantic", 0) / total
+        thr_pct = 100.0 * (
+            by_bucket.get("threshold_fpr", 0) + by_bucket.get("threshold_fnr", 0)
+        ) / total
+        if sem_pct < 5 and thr_pct > 50:
+            logger.warning(
+                "Semantic retrieval is nearly idle (%.1f%%) while threshold "
+                "paths dominate (%.1f%%). Qdrant/hybrid is unlikely to help until "
+                "the instruction DB grows or sim_* thresholds are lowered.",
+                sem_pct,
+                thr_pct,
+            )
+        elif sem_pct > 50 and thr_pct < 5:
+            logger.info(
+                "Semantic paths carry most retrieval (%.1f%%); threshold gates "
+                "are secondary (%.1f%%).",
+                sem_pct,
+                thr_pct,
+            )
 
 
 def _flatten_retrieval_events(results: List[PipelineCaseResult]) -> pd.DataFrame:

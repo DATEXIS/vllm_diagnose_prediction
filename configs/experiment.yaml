@@ -41,8 +41,10 @@ k8s:
     gpu_type: "b200"
     memory_limit: "1024Gi"
   client:
-    gpu_type: "a100"
+    gpu_count: 1
+    gpu_type: "h200"
     memory_limit: "128Gi"
+    # hostname: "cl-worker27"
 
 # MERLIN 2 configuration -- defaults locked per MERLIN2_SPEC.md §6.
 merlin2:
@@ -51,7 +53,13 @@ merlin2:
   sim_icd_threshold: 0.70
   fpr_threshold: 0.5
   fnr_threshold: 0.5
-  min_support: 2
+  min_support: 3
+  # Optional sidecar from scripts/build_rareness_factors.py (full-train IDF).
+  # If missing in the image, main.py falls back to compute_rareness_at_load.
+  rareness_factors_path: "data/rareness_factors.parquet"
+  # Compute IDF from the loaded batch when sidecar is absent (no extra build step).
+  compute_rareness_at_load: true
+  retrieval_events_path: "data/retrieval_events_last.csv"
   convergence_threshold: 0.9
   max_iterations: 4
   max_tokens_budget: 2000        # cumulative token cap across all iterations (Verifier halt)
@@ -76,9 +84,11 @@ merlin2:
   code_stats_artifact_name: "code_stats"
   code_stats_artifact_version: "latest"
 
-# Meta-Verifier (Loop B) -- toggle to mint instructions after a Loop-A pass.
+# Meta-Verifier (Loop B) -- mint instructions + code_stats after each Loop-A pass.
+# Phase 1: run Loop A (empty DB ok), then Loop B populates instructions.parquet.
 meta_verifier:
-  enabled: false
+  enabled: true
   embedding_model: "NeuML/pubmedbert-base-embeddings"
   temperature: 0.4
-  max_tokens: 4096
+  max_tokens: 2048
+  max_note_chars: 5000

@@ -67,3 +67,12 @@ class TestParsePrediction:
     def test_empty_response_raises(self):
         with pytest.raises(JSONExtractionError):
             parse_prediction("")
+
+    def test_salvage_complete_entries_from_truncated_object(self):
+        truncated = (
+            '{"diagnoses": [{"icd_code": "K50.9", "reason": "Crohn disease"}, '
+            '{"icd_code": "K44.9", "reason": "Hernia"}, '
+            '{"icd_code": "R63.4", "reason": "Failure to thrive without end'
+        )
+        model = parse_prediction(truncated)
+        assert [d.icd_code for d in model.diagnoses] == ["K50.9", "K44.9"]

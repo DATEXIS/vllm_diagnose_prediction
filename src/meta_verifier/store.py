@@ -40,6 +40,33 @@ def save_instructions(instructions: List[Instruction], path: str | Path) -> None
     logger.info(f"Wrote {len(instructions)} instructions to {p}")
 
 
+def persist_efficacy_updates(
+    efficacy_by_id: dict[int, float],
+    path: str | Path,
+) -> int:
+    """Write in-memory efficacy scores back to the instruction parquet.
+
+    Only updates instruction_ids present in both the file and
+    `efficacy_by_id`. Returns the number of rows updated.
+    """
+    if not efficacy_by_id:
+        return 0
+    existing = load_instructions(path)
+    if not existing:
+        return 0
+    updated = 0
+    for instr in existing:
+        if instr.instruction_id in efficacy_by_id:
+            instr.efficacy_score = float(efficacy_by_id[instr.instruction_id])
+            updated += 1
+    if updated:
+        save_instructions(existing, path)
+        logger.info(
+            f"Persisted efficacy scores for {updated}/{len(existing)} instructions to {path}"
+        )
+    return updated
+
+
 def append_instructions(new: Iterable[Instruction], path: str | Path) -> List[Instruction]:
     """Load existing, append new (assigning IDs if missing), save, return all."""
     existing = load_instructions(path)

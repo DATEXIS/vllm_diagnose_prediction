@@ -3,7 +3,7 @@
 # Rarely changed.
 
 docker:
-  registry: "registry.datexis.com/jfrick"
+  registry: "registry.datexis.com/yxsg9647"
   image_name: "merlin_2"
   tag: "latest"
   platform: "linux/amd64"
@@ -14,5 +14,5 @@ wandb:
   entity: "datexis-phd"
 
 k8s:
-  namespace: "jfrick"
+  namespace: "yxsg9647"
   image_pull_secrets: "private-registry-auth"

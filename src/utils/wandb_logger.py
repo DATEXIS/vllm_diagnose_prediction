@@ -282,6 +282,18 @@ def log_code_stats_artifact(artifact_name: str, local_path: str) -> None:
     _log_parquet_artifact(artifact_name, "code_stats", local_path)
 
 
+def log_file_artifact(artifact_name: str, artifact_type: str, local_path: str) -> None:
+    """Log any run output file (CSV, etc.) for post-mortem when the pod is gone."""
+    p = Path(local_path)
+    if not p.exists():
+        logger.warning("Skip wandb artifact %s: %s does not exist", artifact_name, p)
+        return
+    artifact = wandb.Artifact(name=artifact_name, type=artifact_type)
+    artifact.add_file(str(p))
+    wandb.log_artifact(artifact)
+    logger.info("Logged %s artifact '%s' from %s", artifact_type, artifact_name, p)
+
+
 def log_meta_verifier_instructions(instructions: List[Instruction]) -> None:
     """Log a snapshot of the new instruction batch."""
     rows = [

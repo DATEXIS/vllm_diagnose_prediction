@@ -253,17 +253,14 @@ async def run_inference_with_system(
                     ]
                 }
                 headers = {"Content-Type": "application/json"}
-                try:
-                    async with session.post(url, json=payload, headers=headers) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            return data["choices"][0]["message"]["content"]
-                        else:
-                            logger.error(f"Error {resp.status}: {await resp.text()}")
-                            return None
-                except Exception as e:
-                    logger.error(f"Request failed: {e}")
-                    return None
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data["choices"][0]["message"]["content"]
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"vLLM request failed ({resp.status}): {body[:2000]}"
+                    )
 
         tasks = [send_with_sem(p) for p in prompts]
         from tqdm.asyncio import tqdm_asyncio

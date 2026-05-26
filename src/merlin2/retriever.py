@@ -249,6 +249,11 @@ class Retriever:
         self._invalidate_cache()
 
     @property
+    def persistent_instructions(self) -> List[Instruction]:
+        """Rows stored in instructions.parquet (excludes runtime FP/FN warnings)."""
+        return list(self._instructions)
+
+    @property
     def instructions(self) -> List[Instruction]:
         # Persistent + synthesised, in that order. The pipeline's
         # `_lookup_instructions` uses this for prompt carry-over and must

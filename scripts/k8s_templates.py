@@ -105,7 +105,7 @@ spec:
       containers:
         - name: inference-client
           image: {{ cfg.docker.registry }}/{{ cfg.docker.image_name }}:{{ cfg.docker.tag }}
-          command: ["python3", "-u", "-m", "src.main", "--config", "/app/config/config.yaml"]
+          args: ["python3", "-u", "-m", "src.main", "--config", "/app/config/config.yaml"]
           volumeMounts:
             - name: config
               mountPath: /app/config
@@ -122,17 +122,24 @@ spec:
                   key: api-key
           resources:
             limits:
-              nvidia.com/gpu: "1"
               memory: "{{ cfg.k8s.client.memory_limit }}"
+{% if cfg.k8s.client.gpu_count | default(0) > 0 %}
+              nvidia.com/gpu: "{{ cfg.k8s.client.gpu_count }}"
+{% endif %}
             requests:
-              nvidia.com/gpu: "1"
               memory: "16Gi"
+{% if cfg.k8s.client.gpu_count | default(0) > 0 %}
+              nvidia.com/gpu: "{{ cfg.k8s.client.gpu_count }}"
+{% endif %}
       volumes:
         - name: config
           configMap:
             name: diagnose-config-{{ cfg.job_name }}
+      {% if cfg.k8s.client.gpu_type is defined and cfg.k8s.client.gpu_count | default(0) > 0 %}
       nodeSelector:
         gpu: {{ cfg.k8s.client.gpu_type }}
+        kubernetes.io/hostname: {{ cfg.k8s.client.hostname }}
+      {% endif %}
       imagePullSecrets:
         - name: {{ cfg.k8s.image_pull_secrets }}
       restartPolicy: Never

@@ -137,7 +137,7 @@ config.json
 opencode.json
 UI/dashboard/.next/
 UI/dashboard/node_modules/
-
+UI/wandb_cache/
 
 # claude
 .claude
