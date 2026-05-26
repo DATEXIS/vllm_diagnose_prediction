@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import traceback
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import httpx
 import traceback
@@ -39,6 +39,7 @@ async def check_connection(api_base: str):
             num_tries += 1
     raise RuntimeError(f"Could not connect to vLLM server after {max_tries} attempts")
 
+
 def build_payload(config: dict, prompt: str, schema: Optional[Dict[str, Any]] = None, system_prompt: Optional[str] = None) -> dict:
     """Builds the JSON payload for the vLLM API request."""
     model_name = config['model']['name']
@@ -51,13 +52,11 @@ def build_payload(config: dict, prompt: str, schema: Optional[Dict[str, Any]] = 
     payload = {
         "model": model_name,
         "temperature": inf_cfg.get('temperature', 0.2),
+        "top_p": inf_cfg.get('top_p', 1.0),
         "max_tokens": inf_cfg.get('max_tokens', 2000),
         "messages": messages,
         "stream": False,
     }
-
-    if "reasoning_budget" in inf_cfg:
-        payload["reasoning_budget"] = inf_cfg["reasoning_budget"]
 
     if inf_cfg.get('guided_decoding', False) and schema:
         payload["response_format"] = {
@@ -137,16 +136,21 @@ def build_payload_from_messages(
     payload = {
         "model": model_name,
         "temperature": inf_cfg.get('temperature', 0.2),
+        "top_p": inf_cfg.get('top_p', 1.0),
         "max_tokens": inf_cfg.get('max_tokens', 2000),
         "messages": messages,
         "stream": False,
     }
 
-    if "reasoning_budget" in inf_cfg:
-        payload["reasoning_budget"] = inf_cfg["reasoning_budget"]
-
     if "repetition_penalty" in inf_cfg:
         payload["repetition_penalty"] = inf_cfg["repetition_penalty"]
+
+    if inf_cfg.get('thinking', False):
+        # Qwen3 is a hybrid model; the chat template only emits <think> tokens
+        # when enable_thinking is explicitly true. Without this kwarg, vLLM's
+        # qwen3 reasoning parser has nothing to extract and reasoning_content
+        # comes back empty.
+        payload["chat_template_kwargs"] = {"enable_thinking": True}
 
     if inf_cfg.get('guided_decoding', False) and schema:
         payload["response_format"] = {
@@ -177,18 +181,12 @@ def build_coroutine_from_messages(
     return request_coro
 
 
-async def run_inference_messages(
+async def _gather_raw_messages(
     config: dict,
     messages_list: List[List[Dict[str, Any]]],
     schema: Optional[Dict[str, Any]] = None,
-) -> List[str]:
-    """Run concurrent inference from pre-built message lists.
-
-    Drop-in replacement for run_inference when the caller already has
-    role-separated messages (system / user / assistant) rather than a flat
-    prompt string. Used by the Generator to send proper chat roles and to
-    pre-fill the assistant turn with the <coding_review> block.
-    """
+) -> List[Any]:
+    """Send message-list requests concurrently; return raw JSON response dicts."""
     job_name = config.get('job_name', 'default')
     namespace = config.get('k8s', {}).get('namespace', 'default')
 
@@ -212,9 +210,38 @@ async def run_inference_messages(
             for messages in messages_list
         ]
         coros_with_prompts = list(zip(coroutines, messages_list))
-        responses = await gather_with_concurrency(concurrency, coros_with_prompts)
+        return await gather_with_concurrency(concurrency, coros_with_prompts)
 
-    return extract_text_from_responses(responses)
+
+async def run_inference_messages(
+    config: dict,
+    messages_list: List[List[Dict[str, Any]]],
+    schema: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Run concurrent inference from pre-built message lists.
+
+    Drop-in replacement for run_inference when the caller already has
+    role-separated messages (system / user / assistant) rather than a flat
+    prompt string. Used by the Generator to send proper chat roles and to
+    pre-fill the assistant turn with the <coding_review> block.
+    """
+    raw = await _gather_raw_messages(config, messages_list, schema)
+    return extract_text_from_responses(raw)
+
+
+async def run_inference_messages_with_thinking(
+    config: dict,
+    messages_list: List[List[Dict[str, Any]]],
+    schema: Optional[Dict[str, Any]] = None,
+) -> Tuple[List[str], List[str]]:
+    """Like run_inference_messages but also returns per-response thinking content.
+
+    Returns (contents, thinking) where thinking[i] is the model's
+    reasoning_content for response i (empty string when not present).
+    Used when inference.thinking=True to capture Qwen3 thinking tokens.
+    """
+    raw = await _gather_raw_messages(config, messages_list, schema)
+    return extract_text_from_responses(raw), extract_thinking_from_responses(raw)
 
 
 async def run_inference_with_system(
@@ -270,6 +297,44 @@ async def run_inference_with_system(
         return await tqdm_asyncio.gather(*tasks, desc="Processing")
 
 
+def extract_thinking_from_responses(responses: List[Any]) -> List[str]:
+    """Extract reasoning (thinking tokens) from vLLM responses.
+
+    Returns one string per response: the model's internal reasoning when
+    inference.thinking=True (Qwen3 thinking mode), or an empty string when
+    the field is absent.
+    """
+    out = []
+    empty_count = 0
+    for resp in responses:
+        thinking = ""
+        if resp and "choices" in resp:
+            msg = resp["choices"][0].get("message", {})
+            raw_val = msg.get("reasoning")  # None if key absent
+            if raw_val:
+                thinking = raw_val
+            else:
+                empty_count += 1
+                if empty_count == 1:
+                    # Log once so we can diagnose: show all message keys and
+                    # the first 200 chars of content to check for leaked <think>
+                    content_preview = str(msg.get("content", ""))[:200]
+                    logger.warning(
+                        "reasoning missing or null in response message. "
+                        "message keys=%s | content[:200]=%r",
+                        list(msg.keys()), content_preview,
+                    )
+        out.append(thinking)
+    if empty_count:
+        logger.warning(
+            "%d/%d responses had no reasoning — "
+            "guided_decoding may be suppressing <think> tokens. "
+            "Check server logs for reasoning-parser activity.",
+            empty_count, len(responses),
+        )
+    return out
+
+
 def extract_text_from_responses(responses: List[Any]) -> List[str]:
     final_output = []
     for i, resp in enumerate(responses):
@@ -280,8 +345,8 @@ def extract_text_from_responses(responses: List[Any]) -> List[str]:
             raise RuntimeError(f"Response {i} returned API error: {resp['error']}")
 
         if "choices" not in resp:
-            if "reasoning_content" in resp:
-                final_output.append(resp["reasoning_content"])
+            if "reasoning" in resp:
+                final_output.append(resp["reasoning"])
                 continue
 
             raise RuntimeError(f"Response {i} missing 'choices' field. Keys: {list(resp.keys())}")
@@ -292,8 +357,17 @@ def extract_text_from_responses(responses: List[Any]) -> List[str]:
             text = choice["message"].get("content", "")
 
             # 0.19.1 specific: check if content is null but reasoning exists
-            if not text and "reasoning_content" in choice["message"]:
-                text = choice["message"]["reasoning_content"]
+            if not text and "reasoning" in choice["message"]:
+                text = choice["message"]["reasoning"]
+
+            finish_reason = choice.get("finish_reason", "unknown")
+            if finish_reason == "length":
+                usage = resp.get("usage", {})
+                logger.warning(
+                    f"Response {i} hit max_tokens (finish_reason=length). "
+                    f"completion_tokens={usage.get('completion_tokens', '?')}, "
+                    f"prompt_tokens={usage.get('prompt_tokens', '?')}"
+                )
 
             final_output.append(text)
         except (KeyError, IndexError) as e:

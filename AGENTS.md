@@ -3,13 +3,12 @@ These are general instructions. The repo might contain additional repo specific 
 You can call me Jan.
 
 ## Coding style:
-This is research code, not production code. Optimize for iteration speed and debuggability, not robustness:
+Research-first: prioritize iteration speed and debuggability over robustness.
 
-- Let it crash. Loud failures > silent fallbacks.
-- No defensive try/except around things that "might" fail — I want the stack trace.
-- No retry loops, no graceful degradation, no "safe defaults" that mask bugs.
-- A crashed run I can debug is cheaper than a half-completed run that wasted hours of compute.
-- Validate inputs at boundaries only. Inside the code, trust the types.
+- Fail Loud: No defensive try/except, retries, or "safe defaults." Let it crash to preserve the stack trace.
+- Boundary Validation: Validate at entry points only; trust types and internal logic implicitly.
+- Layered Abstraction: Compose small, single-purpose functions into a top-down hierarchy. High-level code should describe what is happening; helpers handle how.
+- Comments can be helpful, but code should be self-explanatory.
 
 ## Repo Structure
 Most experiments are run with k8s. k8s yaml are build at runtime by scripts using settings in config.

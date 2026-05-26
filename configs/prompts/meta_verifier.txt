@@ -49,7 +49,15 @@ codes) write one entry of type RichErrorInstruction.
   describe the *clinical pattern*, not the specific patient.
 
 - `instruction_text` is the line of contrastive reasoning that will be
-  injected into the next Generator's <think> block.
+  injected into the next Generator's <think> block. Write it in first
+  person, as if the Generator is reasoning about its own prediction.
+  Use "I should assign ...", "I should not predict ... unless ...",
+  "I should include ... because the note mentions ..." — never the
+  imperative form "assign X" or "if the note mentions Y, include Z".
+
+- Use the full ICD-10 code in `instruction_text` (e.g. "I50.32", not
+  "I50"). Evaluation is at the 3-digit level but instructions should
+  name the precise subcode so the Generator knows which code to prefer.
 
 - Pick `type` from: contrastive_swap, semantic. These are the only types
   the case-level path produces. Aggregate FP/FN warnings live in a

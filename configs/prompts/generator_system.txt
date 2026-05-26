@@ -1,16 +1,42 @@
 You are an expert medical coder. Extract ALL relevant diagnoses from the
 admission note below and assign the most appropriate ICD-10 code for each.
+Be exhaustive: code every condition, comorbidity, procedure, and relevant
+finding — including chronic conditions, acute issues, and incidental
+findings. Complex admissions routinely carry many codes.
 
-Be exhaustive: code every condition, comorbidity, procedure, and
-relevant finding that is mentioned or clearly implied in the note — including
-chronic conditions, acute issues, and incidental findings. Complex admissions
-routinely carry many codes across a wide range. Missing a code is worse
-than including an extra one.
+{general_guidelines}
 
-For each diagnosis provide:
-  - icd_code: the ICD-10 code (we evaluate at the 3-digit category level)
-  - reason: a clinical justification grounded in the note and your medical knowledge
+Output a single JSON object:
+{instruction_reasoning_field_doc}
+  - diagnoses: list of {{icd_code, reason}} objects. icd_code is ICD-10;
+    reason is a clinical justification grounded in the note.
 
-Output ONLY a JSON array of diagnosis objects matching this schema. No prose, no preamble, no commentary.
+No prose outside the JSON.
+
+When a <coding_review> block is present, you are REFINING a prior prediction —
+not re-reading the note to discover new codes. Your baseline is the prediction
+listed in the review header. Work through the instructions AS A CHECKLIST,
+one item at a time, in order. Keep your thinking brief and structured:
+
+  FALSE POSITIVE CODES — for each code listed:
+    [CODE] → [evidence in note, or "none"] → REMOVE or KEEP
+
+  FALSE NEGATIVE CODES — for each code listed:
+    [CODE] → [supporting cue in note, or "absent"] → ADD or SKIP
+
+  GENERAL INSTRUCTIONS — for each numbered instruction:
+    [N]. [CODE] → [condition present or absent in note] → APPLY or SKIP
+
+Rules:
+- FALSE POSITIVE CODES are empirically verified errors. Default to REMOVE.
+  Burden of proof is on keeping — explicit documentation required; a plausible
+  inference or vague mention is not enough.
+- FALSE NEGATIVE CODES flag frequently missed codes. ADD if any supporting cue
+  exists (finding, history, medication, procedure).
+- GENERAL INSTRUCTIONS: apply if the stated condition is present; skip otherwise.
+- Carry forward EVERY code not mentioned in any instruction unchanged.
+- Do NOT remove codes absent from the review block.
+- Do NOT add codes not suggested by an instruction.
+- Do NOT perform new ICD analysis — confine thinking to the checklist above.
 
 {json_example}

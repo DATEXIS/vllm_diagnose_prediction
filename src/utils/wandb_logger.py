@@ -10,6 +10,7 @@ job starts can trigger 429s even with a valid key; a short wait resolves it.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -19,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import wandb
+import yaml
 
 from src.merlin2.retriever import RetrievalEvent
 from src.meta_verifier.schemas import Instruction
@@ -92,6 +94,8 @@ def log_parameters(config: Dict[str, Any]) -> None:
             "merlin2.sim_icd_threshold": merlin2.get("sim_icd_threshold"),
             "merlin2.fpr_threshold": merlin2.get("fpr_threshold"),
             "merlin2.fnr_threshold": merlin2.get("fnr_threshold"),
+            "merlin2.dedup_cluster_threshold": merlin2.get("dedup_cluster_threshold"),
+            "merlin2.max_instructions_per_code": merlin2.get("max_instructions_per_code"),
             "merlin2.convergence_threshold": merlin2.get("convergence_threshold"),
             "merlin2.max_iterations": merlin2.get("max_iterations"),
             "merlin2.max_tokens_budget": merlin2.get("max_tokens_budget"),
@@ -138,7 +142,13 @@ def log_per_iteration_metrics(per_iter: List[Dict[str, Any]]) -> None:
         wandb.log(log_dict)
 
 
-def log_sample_table(df: pd.DataFrame, n_samples: int = 30) -> None:
+def log_experiment_config(config: Dict[str, Any]) -> None:
+    """Log the full experiment config as a rendered YAML block (once per run)."""
+    yaml_text = yaml.dump(config, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    wandb.log({"experiment_yaml": wandb.Html(f"<pre style='font-size:12px'>{yaml_text}</pre>")})
+
+
+def log_sample_table(df: pd.DataFrame, config: dict, n_samples: int = 30) -> None:
     """Log a small sample table for debugging. Strings only; no nested objects.
 
     Drops verbose / redundant columns:
@@ -150,12 +160,24 @@ def log_sample_table(df: pd.DataFrame, n_samples: int = 30) -> None:
       - ICD_CODES / true_labels (original target column): already normalised
         into true_codes by the pipeline.
     """
-    drop_cols = [
-        'hadm_id', 'subject_id', 'discharge_note',
-        'predictions',       # verbose JSON; full_diagnoses / parsed_predictions are cleaner
-        'admission_note',    # too long for table inspection
-    ]
-    log_df = df.drop(columns=drop_cols, errors="ignore")
+    log_df = df.drop(
+        columns=['subject_id', 'discharge_note', 'true_codes'],
+        errors="ignore",
+    )
+
+    if config['inference'].get('guided_decoding'):
+        log_df = log_df.drop(columns=['predictions'], errors="ignore")
+
+    log_df = log_df.copy()
+
+    if "rareness_factor" in log_df.columns:
+        log_df["rareness_factor"] = log_df["rareness_factor"].round(3)
+
+    if "full_diagnoses" in log_df.columns:
+        log_df["full_diagnoses"] = log_df["full_diagnoses"].apply(
+            lambda fd: json.dumps(fd, indent=2, ensure_ascii=False)
+        )
+
     sample = log_df.head(n_samples).map(str)
     wandb.log({"sample_predictions": wandb.Table(dataframe=sample)})
 
@@ -279,6 +301,63 @@ def download_code_stats_artifact(
 
 def log_code_stats_artifact(artifact_name: str, local_path: str) -> None:
     _log_parquet_artifact(artifact_name, "code_stats", local_path)
+
+
+def log_predictions_artifact(df: pd.DataFrame, artifact_name: str = "predictions") -> None:
+    """Upload the full predictions dataframe as a parquet artifact.
+
+    Columns with non-serialisable objects (e.g. list-of-dicts full_diagnoses)
+    are JSON-encoded to strings so pyarrow can write them cleanly.
+    """
+    tmp_path = Path("/tmp") / f"{artifact_name}.parquet"
+    out = df.copy()
+    for col in out.columns:
+        if out[col].dtype == object:
+            sample = out[col].dropna()
+            if len(sample) and isinstance(sample.iloc[0], (list, dict)):
+                out[col] = out[col].apply(json.dumps)
+    out.to_parquet(tmp_path, index=False)
+    artifact = wandb.Artifact(name=artifact_name, type="predictions")
+    artifact.add_file(str(tmp_path))
+    wandb.log_artifact(artifact)
+    logger.info(f"Logged predictions artifact '{artifact_name}' ({len(df)} rows) from {tmp_path}")
+
+
+def log_instruction_efficiency_tables(instructions: List[Instruction]) -> None:
+    """Log top-30 and bottom-30 instructions by efficacy_score as wandb Tables.
+
+    Called after efficacy scores are updated (end of Loop A, training only).
+    Skips if the store is empty. Only persistent instructions are passed in
+    (synthesised threshold warnings are never in the store).
+    """
+    if not instructions:
+        return
+
+    def _row(i: Instruction) -> dict:
+        return {
+            "instruction_id": i.instruction_id,
+            "type": i.type,
+            "action": i.action,
+            "section": i.section,
+            "target_codes": ",".join(i.target_codes),
+            "efficacy_score": round(i.efficacy_score, 6),
+            "description": i.description[:200],
+            "instruction_text": i.instruction_text[:200],
+            "source_hadm_ids": ",".join(i.source_hadm_ids),
+        }
+
+    sorted_by_eff = sorted(instructions, key=lambda x: x.efficacy_score, reverse=True)
+    top30 = [_row(i) for i in sorted_by_eff[:30]]
+    bottom30 = [_row(i) for i in sorted_by_eff[-30:]]
+
+    wandb.log({
+        "instructions/top30_by_efficacy": wandb.Table(dataframe=pd.DataFrame(top30)),
+        "instructions/bottom30_by_efficacy": wandb.Table(dataframe=pd.DataFrame(bottom30)),
+    })
+    logger.info(
+        "Logged top-30 / bottom-30 instruction efficiency tables "
+        "(%d total instructions).", len(instructions)
+    )
 
 
 def log_meta_verifier_instructions(instructions: List[Instruction]) -> None:

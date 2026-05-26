@@ -417,3 +417,148 @@ class TestPriorityAndBudget:
         result = r.retrieve("note", previous_predicted_codes=None)
         assert len(result.instructions) <= 1
         assert result.skipped_for_budget >= 1
+
+
+class TestClusterDeduplication:
+    """Post-retrieval cluster dedup collapses near-duplicate semantic
+    instructions (instruction-to-instruction cosine sim >= threshold)
+    to a single highest-efficacy representative per cluster.
+
+    Tests pass note_embedding explicitly so encode_single_text is never
+    called and no monkeypatching is needed.
+    """
+
+    def test_near_duplicate_keeps_higher_efficacy(self):
+        # Both embeddings are [1,0] → cosine sim = 1.0 → same cluster.
+        # Higher-efficacy instruction (id=1, efficacy=0.9) survives; id=2 dropped.
+        r = Retriever(sim_note_threshold=0.5, dedup_cluster_threshold=0.9)
+        r.load_instructions([
+            _semantic(1, ["Z85"], [1.0, 0.0], efficacy=0.9),
+            _semantic(2, ["Z85"], [1.0, 0.0], efficacy=0.1),
+        ])
+        result = r.retrieve("note", previous_predicted_codes=None, note_embedding=[1.0, 0.0])
+        assert [i.instruction_id for i in result.instructions] == [1]
+
+    def test_dissimilar_instructions_both_kept(self):
+        # Orthogonal embeddings ([1,0] vs [0,1]) → cosine sim = 0 → different
+        # clusters → both survive.  Note embedding [1,1] (unnormalized, sim ≈ 0.71
+        # to both) ensures both are retrieved before dedup runs.
+        r = Retriever(sim_note_threshold=0.5, dedup_cluster_threshold=0.9)
+        r.load_instructions([
+            _semantic(1, ["Z85"], [1.0, 0.0], efficacy=0.9),
+            _semantic(2, ["I10"], [0.0, 1.0], efficacy=0.1),
+        ])
+        result = r.retrieve("note", previous_predicted_codes=None, note_embedding=[1.0, 1.0])
+        assert {i.instruction_id for i in result.instructions} == {1, 2}
+
+    def test_threshold_one_disables_dedup(self):
+        # dedup_cluster_threshold=1.0 means nothing is ever "too similar";
+        # all retrieved instructions pass through.
+        r = Retriever(sim_note_threshold=0.5, dedup_cluster_threshold=1.0)
+        r.load_instructions([
+            _semantic(1, ["Z85"], [1.0, 0.0], efficacy=0.9),
+            _semantic(2, ["Z85"], [1.0, 0.0], efficacy=0.1),
+        ])
+        result = r.retrieve("note", previous_predicted_codes=None, note_embedding=[1.0, 0.0])
+        assert len(result.instructions) == 2
+
+    def test_cluster_dedup_does_not_affect_threshold_path(self, patched_encoder):
+        # FPR/FNR instructions have no embedding and must not be collapsed by
+        # the semantic dedup step regardless of threshold setting.
+        patched_encoder.return_value = [0.0, 0.0]
+        r = Retriever(
+            sim_note_threshold=0.99,
+            dedup_cluster_threshold=0.9,
+            fpr_threshold=0.5,
+            code_stats={
+                "I10": _stat_fp("I10", 0.78),
+                "E11": _stat_fp("E11", 0.81),
+            },
+        )
+        result = r.retrieve("note", previous_predicted_codes=["I10", "E11"])
+        assert len(result.instructions) == 2
+        assert all(i.type == InstructionType.FP_WARNING for i in result.instructions)
+
+    def test_three_cluster_two_distinct(self):
+        # Three instructions: ids 1 and 2 are near-duplicates ([1,0] vs [1,0]),
+        # id 3 is distinct ([0,1]).  After dedup: ids 1 and 3 survive.
+        # Note embedding [1,1] hits all three (sim ≈ 0.71 to each axis).
+        r = Retriever(sim_note_threshold=0.5, dedup_cluster_threshold=0.9)
+        r.load_instructions([
+            _semantic(1, ["Z85"], [1.0, 0.0], efficacy=0.9),
+            _semantic(2, ["Z85"], [1.0, 0.0], efficacy=0.5),
+            _semantic(3, ["I10"], [0.0, 1.0], efficacy=0.1),
+        ])
+        result = r.retrieve("note", previous_predicted_codes=None, note_embedding=[1.0, 1.0])
+        ids = {i.instruction_id for i in result.instructions}
+        assert ids == {1, 3}
+
+
+class TestPerCodeCap:
+    """max_instructions_per_code limits how many semantic instructions can
+    target the same 3-digit ICD code; highest-efficacy ones survive.
+
+    Tests pass note_embedding explicitly to avoid encode_single_text calls.
+    """
+
+    def test_excess_instructions_for_same_code_are_dropped(self):
+        # Three instructions all targeting Z86; cap=2 → only top-2 by efficacy kept.
+        r = Retriever(sim_note_threshold=0.5, max_instructions_per_code=2)
+        r.load_instructions([
+            _semantic(1, ["Z86"], [1.0, 0.0], efficacy=0.9),
+            _semantic(2, ["Z86"], [0.9, 0.1], efficacy=0.5),
+            _semantic(3, ["Z86"], [0.8, 0.2], efficacy=0.1),
+        ])
+        result = r.retrieve("note", previous_predicted_codes=None, note_embedding=[1.0, 0.0])
+        ids = {i.instruction_id for i in result.instructions}
+        assert ids == {1, 2}
+
+    def test_different_codes_are_independent(self):
+        # Two instructions for Z86 (cap reached) + two for I10 (separate counter).
+        # All four should survive when cap=2.
+        r = Retriever(sim_note_threshold=0.5, max_instructions_per_code=2)
+        r.load_instructions([
+            _semantic(1, ["Z86"], [1.0, 0.0], efficacy=0.9),
+            _semantic(2, ["Z86"], [1.0, 0.0], efficacy=0.5),
+            _semantic(3, ["I10"], [1.0, 0.0], efficacy=0.4),
+            _semantic(4, ["I10"], [1.0, 0.0], efficacy=0.2),
+        ])
+        result = r.retrieve("note", previous_predicted_codes=None, note_embedding=[1.0, 0.0])
+        assert {i.instruction_id for i in result.instructions} == {1, 2, 3, 4}
+
+    def test_multi_code_instruction_counts_against_each_code(self):
+        # Instruction 1 targets [Z86, I10] (counts against both).
+        # Instruction 2 targets [Z86] — Z86 already at cap=1 → dropped.
+        # Instruction 3 targets [I10] — I10 already at cap=1 → dropped.
+        r = Retriever(sim_note_threshold=0.5, max_instructions_per_code=1)
+        r.load_instructions([
+            _semantic(1, ["Z86", "I10"], [1.0, 0.0], efficacy=0.9),
+            _semantic(2, ["Z86"],        [1.0, 0.0], efficacy=0.5),
+            _semantic(3, ["I10"],        [1.0, 0.0], efficacy=0.3),
+        ])
+        result = r.retrieve("note", previous_predicted_codes=None, note_embedding=[1.0, 0.0])
+        assert [i.instruction_id for i in result.instructions] == [1]
+
+    def test_none_disables_cap(self):
+        # max_instructions_per_code=None (default) → no limit applied.
+        r = Retriever(sim_note_threshold=0.5, max_instructions_per_code=None)
+        r.load_instructions([
+            _semantic(1, ["Z86"], [1.0, 0.0], efficacy=0.9),
+            _semantic(2, ["Z86"], [1.0, 0.0], efficacy=0.5),
+            _semantic(3, ["Z86"], [1.0, 0.0], efficacy=0.1),
+        ])
+        result = r.retrieve("note", previous_predicted_codes=None, note_embedding=[1.0, 0.0])
+        assert len(result.instructions) == 3
+
+    def test_no_target_codes_always_admitted(self):
+        # An instruction with empty target_codes has nothing to count against
+        # and must always pass through regardless of cap.
+        r = Retriever(sim_note_threshold=0.5, max_instructions_per_code=1)
+        r.load_instructions([
+            _semantic(1, ["Z86"], [1.0, 0.0], efficacy=0.9),
+            _semantic(2, ["Z86"], [1.0, 0.0], efficacy=0.5),
+            _semantic(3, [],      [1.0, 0.0], efficacy=0.1),  # no target codes
+        ])
+        result = r.retrieve("note", previous_predicted_codes=None, note_embedding=[1.0, 0.0])
+        ids = {i.instruction_id for i in result.instructions}
+        assert ids == {1, 3}  # id=2 dropped (Z86 at cap), id=3 always admitted

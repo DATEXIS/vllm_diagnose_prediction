@@ -37,6 +37,7 @@ spec:
             - "--max-num-seqs={{ cfg.model.max_num_seqs }}"
             - "--max-num-batched-tokens={{ cfg.model.max_num_batched_tokens }}"
             {% if cfg.model.enable_chunked_prefill %}- "--enable-chunked-prefill"{% endif %}
+            {% if cfg.inference.thinking %}- "--reasoning-parser=qwen3"{% endif %}
           ports:
             - containerPort: 8000
           resources:
@@ -133,6 +134,7 @@ spec:
             name: diagnose-config-{{ cfg.job_name }}
       nodeSelector:
         gpu: {{ cfg.k8s.client.gpu_type }}
+        kubernetes.io/hostname: cl-worker27
       imagePullSecrets:
         - name: {{ cfg.k8s.image_pull_secrets }}
       restartPolicy: Never

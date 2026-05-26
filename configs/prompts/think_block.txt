@@ -1,3 +1,4 @@
 <coding_review>
 {content}
 </coding_review>
+→ CHECKLIST MODE: Do NOT re-read the note or generate new codes from scratch. Your thinking must begin by stating the prior prediction, then process every instruction above — one per line — before touching any code.

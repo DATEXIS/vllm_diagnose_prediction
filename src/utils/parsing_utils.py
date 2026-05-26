@@ -1,18 +1,20 @@
 """Minimal JSON parsing for LLM responses.
 
-Three output formats are accepted, tried in order:
+Four output formats are accepted, tried in order:
 
-  1. JSON array (preferred / new format)
-       [{icd_code, reason}, ...]
-     The model is instructed to emit this. Most natural for a list task;
-     removes one nesting level that caused frequent 'diagnoses: Field required'
-     failures.
+  1. JSON object with `instruction_reasoning` + `diagnoses` (primary / new format)
+       {"instruction_reasoning": "...", "diagnoses": [{icd_code, reason}, ...]}
+     The model is instructed to emit this. The reasoning field is extracted and
+     stored; it may be empty when no coding_review block was present.
 
-  2. JSON object with a `diagnoses` key (legacy format)
+  2. JSON object with a `diagnoses` key only (legacy object format)
        {"diagnoses": [{icd_code, reason}, ...]}
-     Kept for backward compatibility and for cases where the model reverts.
+     Kept for backward compatibility.
 
-  3. Single ICDPrediction dict (common mis-generation)
+  3. JSON array (legacy array format)
+       [{icd_code, reason}, ...]
+
+  4. Single ICDPrediction dict (common mis-generation)
        {"icd_code": "N20", "reason": "..."}
      Wraps the lone item into a single-diagnosis ICDsModel so the case is
      not silently dropped.
@@ -41,6 +43,16 @@ _THINK_OPEN_RE = re.compile(r"<think>.*$", re.DOTALL)
 
 class JSONExtractionError(ValueError):
     """Raised when no valid prediction JSON can be extracted from a response."""
+
+
+def extract_model_thinking(text: str) -> str:
+    """Return the content of the first <think>…</think> block, or "" if absent.
+
+    Captures the model's own chain-of-thought reasoning, separate from the
+    <coding_review> block that was injected into the prompt.
+    """
+    m = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+    return m.group(1).strip() if m else ""
 
 
 # --------------------------------------------------------------- stripping
@@ -165,7 +177,32 @@ def parse_prediction(response: str) -> ICDsModel:
     text = _strip_think_blocks(response) or response
     errors: List[str] = []
 
-    # ---- 1. array -------------------------------------------------------
+    # ---- 1. {instruction_reasoning, diagnoses} object (primary format) --
+    try:
+        obj_str = extract_last_json_object(text)
+        raw_obj = json.loads(obj_str)
+
+        if isinstance(raw_obj, dict) and "diagnoses" in raw_obj:
+            try:
+                return ICDsModel.model_validate(raw_obj)
+            except ValidationError as e:
+                errors.append(f"Object (with diagnoses) invalid: {e}")
+
+        # ---- 4. single ICDPrediction dict --------------------------------
+        elif isinstance(raw_obj, dict) and "icd_code" in raw_obj:
+            try:
+                single = ICDPrediction.model_validate(raw_obj)
+                logger.debug("Wrapped single ICDPrediction dict into ICDsModel")
+                return ICDsModel(diagnoses=[single])
+            except ValidationError as e:
+                errors.append(f"Single dict invalid: {e}")
+        else:
+            errors.append("Object has neither 'diagnoses' nor 'icd_code' key")
+
+    except (JSONExtractionError, json.JSONDecodeError) as e:
+        errors.append(f"No object: {e}")
+
+    # ---- 3. legacy array [{icd_code, reason}, ...] ----------------------
     try:
         arr_str = extract_last_json_array(text)
         raw_list = json.loads(arr_str)
@@ -186,30 +223,25 @@ def parse_prediction(response: str) -> ICDsModel:
     except (JSONExtractionError, json.JSONDecodeError) as e:
         errors.append(f"No array: {e}")
 
-    # ---- 2. {diagnoses: [...]} object -----------------------------------
-    try:
-        obj_str = extract_last_json_object(text)
-        raw_obj = json.loads(obj_str)
-
-        if isinstance(raw_obj, dict) and "diagnoses" in raw_obj:
-            try:
-                return ICDsModel.model_validate(raw_obj)
-            except ValidationError as e:
-                errors.append(f"Object diagnoses invalid: {e}")
-
-        # ---- 3. single ICDPrediction dict --------------------------------
-        elif isinstance(raw_obj, dict) and "icd_code" in raw_obj:
-            try:
-                single = ICDPrediction.model_validate(raw_obj)
-                logger.debug("Wrapped single ICDPrediction dict into ICDsModel")
-                return ICDsModel(diagnoses=[single])
-            except ValidationError as e:
-                errors.append(f"Single dict invalid: {e}")
-        else:
-            errors.append(f"Object has neither 'diagnoses' nor 'icd_code' key")
-
-    except (JSONExtractionError, json.JSONDecodeError) as e:
-        errors.append(f"No object: {e}")
+    # ---- 4. truncated-object recovery: instruction_reasoning ate the budget,
+    #         but "diagnoses" array was still emitted before truncation. ------
+    diagnoses_match = re.search(r'"diagnoses"\s*:\s*(\[)', text)
+    if diagnoses_match:
+        try:
+            arr_str = extract_last_json_array(text[diagnoses_match.start(1):])
+            raw_list = json.loads(arr_str)
+            if isinstance(raw_list, list):
+                diagnoses = [
+                    ICDPrediction.model_validate(item)
+                    for item in raw_list
+                    if isinstance(item, dict)
+                ]
+                if diagnoses:
+                    logger.warning("Recovered diagnoses from truncated JSON object.")
+                    return ICDsModel(diagnoses=diagnoses)
+                errors.append("Truncated-object recovery: diagnoses array empty")
+        except (JSONExtractionError, json.JSONDecodeError, ValidationError) as e:
+            errors.append(f"Truncated-object recovery failed: {e}")
 
     post_think = _strip_think_blocks(response)
     if post_think:

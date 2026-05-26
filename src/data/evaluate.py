@@ -6,6 +6,7 @@ in the same dict for both averages.
 """
 
 import ast
+import json
 import logging
 from typing import Any, List
 
@@ -60,9 +61,9 @@ def sample_prf(true_codes: List[str], pred_codes: List[str]) -> tuple:
     if not t and not p:
         return 1.0, 1.0, 1.0
     tp = len(t & p)
-    precision = tp / len(p) if p else 0.0
-    recall = tp / len(t) if t else 0.0
-    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    precision = round(tp / len(p) if p else 0.0, 3)
+    recall = round(tp / len(t) if t else 0.0, 3)
+    f1 = round(2 * precision * recall / (precision + recall) if precision + recall else 0.0, 3)
     return precision, recall, f1
 
 
@@ -91,14 +92,23 @@ def calculate_metrics(y_true: List[List[str]], y_pred: List[List[str]]) -> dict:
     }
 
 
-def _parse_prediction_row(serialized: str) -> List[dict]:
-    """Parse a single row of the `predictions` column into a list of diagnosis dicts.
+def _parse_prediction_row(serialized: str) -> dict:
+    """Parse a single row of the `predictions` column into a full model dict.
 
-    The pipeline writes each row as `ICDsModel.model_dump_json()`. We
-    validate it back; malformed rows raise (fail-fast).
+    Returns {"diagnoses": [{icd_code, reason}, ...]} and includes
+    "instruction_reasoning" only when the serialized JSON actually contains
+    that key. When inference.instruction_reasoning=False the field is excluded
+    at serialization time (model_dump_json exclude={"instruction_reasoning"}),
+    so it won't appear here either — no phantom empty strings.
     """
-    model = ICDsModel.model_validate_json(serialized)
-    return [{"icd_code": d.icd_code, "reason": d.reason} for d in model.diagnoses]
+    raw = json.loads(serialized)
+    model = ICDsModel.model_validate(raw)
+    result: dict = {
+        "diagnoses": [{"icd_code": d.icd_code, "reason": d.reason} for d in model.diagnoses],
+    }
+    if "instruction_reasoning" in raw:
+        result["instruction_reasoning"] = model.instruction_reasoning
+    return result
 
 
 def evaluate_predictions(df: pd.DataFrame, target_col: str):
@@ -108,7 +118,7 @@ def evaluate_predictions(df: pd.DataFrame, target_col: str):
         raise ValueError("No predictions found in dataframe.")
 
     full_diagnoses = [_parse_prediction_row(p) for p in predictions]
-    y_pred_lists = [[d["icd_code"] for d in row] for row in full_diagnoses]
+    y_pred_lists = [[d["icd_code"] for d in row["diagnoses"]] for row in full_diagnoses]
     y_true_lists = [safe_parse_true_labels(v) for v in df[target_col].tolist()]
 
     valid_json_count = sum(1 for pred in y_pred_lists if pred)

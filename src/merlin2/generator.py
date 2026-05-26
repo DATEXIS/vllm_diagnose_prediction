@@ -10,6 +10,8 @@ Prompt roles are sent as proper chat messages:
   - user  : admission note, with the <coding_review> block appended inline
             when retrieved instructions exist (t >= 1)
 
+The <coding_review> block itself is rendered in `instruction_feedback.py`.
+
 There is no mock branch in the production code path. Tests should patch
 `_call_vllm_batch` (the only network boundary).
 """
@@ -19,12 +21,18 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple  # noqa: F401 (Tuple used in _call_vllm_batch)
 
+from src.merlin2.instruction_feedback import build_think_block
 from src.meta_verifier.schemas import Instruction
 from src.prompter import ICDsModel, get_schema
 from src.utils.parsing_utils import JSONExtractionError, parse_prediction
-from src.utils.prompt_loader import GENERATOR_JSON_EXAMPLE, load_prompt
+from src.utils.prompt_loader import (
+    GENERAL_GUIDELINES,
+    INSTRUCTION_REASONING_FIELD_DOC,
+    build_json_example,
+    load_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +59,9 @@ class GenerateResult:
     prediction: ICDsModel
     raw_response: str
     prompt: str
-    think_block: str = ""
+    coding_review: str = ""
     parse_failed: bool = False  # True if the model returned no usable JSON
+    thinking_content: str = ""  # reasoning_content from vLLM when inference.thinking=True
 
 
 class Generator:
@@ -69,6 +78,11 @@ class Generator:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.config = config or {}
+        inf_cfg = self.config.get("inference", {})
+        self.instruction_reasoning: bool = inf_cfg.get("instruction_reasoning", True)
+        self.thinking: bool = inf_cfg.get("thinking", False)
+        merlin_cfg = self.config.get("merlin2", {})
+        self.max_history_depth: Optional[int] = merlin_cfg.get("max_history_depth", 2)
 
     # ----------------------------------------------------------------- API
     async def generate_batch(self, requests: List[GenerateRequest]) -> List[GenerateResult]:
@@ -81,29 +95,35 @@ class Generator:
         """
         messages_and_thinks = [self._build_prompt(req) for req in requests]
         messages_list = [msgs for msgs, _ in messages_and_thinks]
-        responses = await self._call_vllm_batch(messages_list)
-        results: List[GenerateResult] = []
-        for (messages, think_block), raw in zip(messages_and_thinks, responses):
-            try:
-                prediction = parse_prediction(raw)
-                parse_failed = False
-            except JSONExtractionError as e:
-                logger.warning(
-                    f"Parse failure: {e}. Returning empty prediction for this case."
-                )
-                prediction = ICDsModel(diagnoses=[])
-                parse_failed = True
-            results.append(
-                GenerateResult(
-                    prediction=prediction,
-                    raw_response=raw,
-                    # Serialise messages as JSON for logging / debugging.
-                    prompt=json.dumps(messages, ensure_ascii=False),
-                    think_block=think_block,
-                    parse_failed=parse_failed,
-                )
-            )
-        return results
+        responses, thinking_list = await self._call_vllm_batch(messages_list)
+        return [
+            self._build_result(messages, coding_review, raw, thinking)
+            for (messages, coding_review), raw, thinking
+            in zip(messages_and_thinks, responses, thinking_list)
+        ]
+
+    @staticmethod
+    def _build_result(
+        messages: List[Dict[str, str]],
+        coding_review: str,
+        raw: str,
+        thinking_content: str = "",
+    ) -> GenerateResult:
+        try:
+            prediction = parse_prediction(raw)
+            parse_failed = False
+        except JSONExtractionError as e:
+            logger.warning(f"Parse failure: {e}. Returning empty prediction for this case.")
+            prediction = ICDsModel(diagnoses=[])
+            parse_failed = True
+        return GenerateResult(
+            prediction=prediction,
+            raw_response=raw,
+            prompt=json.dumps(messages, ensure_ascii=False),
+            coding_review=coding_review,
+            parse_failed=parse_failed,
+            thinking_content=thinking_content,
+        )
 
     # --------------------------------------------------------- prompt build
     def _build_prompt(
@@ -123,100 +143,61 @@ class Generator:
         the user turn lets the model generate a clean JSON response with full
         context visible.
         """
-        system = load_prompt("generator_system").format(json_example=GENERATOR_JSON_EXAMPLE)
+        system = load_prompt("generator_system").format(
+            json_example=build_json_example(self.instruction_reasoning),
+            general_guidelines=GENERAL_GUIDELINES,
+            instruction_reasoning_field_doc=(
+                INSTRUCTION_REASONING_FIELD_DOC if self.instruction_reasoning else ""
+            ),
+        )
         user = load_prompt("generator_user").format(admission_note=req.admission_note)
-        think_block = self._build_think_block(req.instruction_history)
-
-        user_content = f"{user}\n{think_block}" if think_block else user
+        coding_review = build_think_block(req.instruction_history, self.max_history_depth)
+        user_content = f"{user}\n{coding_review}" if coding_review else user
 
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": system},
             {"role": "user",   "content": user_content},
         ]
-
-        return messages, think_block
-
-    def _build_think_block(
-        self,
-        instruction_history: List[Tuple[List[str], List[Instruction]]],
-    ) -> str:
-        """Build a structured, per-iteration <coding_review> block.
-
-        Returns "" if there are no instructions anywhere (zero-shot or all
-        retrieval misses) — in that case the Generator runs without a think
-        block prefix.
-
-        Otherwise builds one block per history entry with a natural-language
-        header that reads like genuine model reasoning:
-
-            My initial prediction was I69, N31, N39, so I considered the following:
-            - Code N85 is missed in 100% of cases where it should have been assigned ...
-
-            Based on this information I predicted I69, N31, N39, N85, so I considered the following:
-            - Code Z16 is missed in 100% of cases ...
-        """
-        # Skip if nothing useful to show
-        if not any(instrs for _, instrs in instruction_history):
-            return ""
-
-        line_template = load_prompt("think_instruction_line")
-        iter_block_template = load_prompt("think_iteration_block")
-
-        blocks: List[str] = []
-        for t, (codes, instructions) in enumerate(instruction_history):
-            codes_str = ", ".join(codes) if codes else "(none)"
-            if t == 0:
-                iteration_header = (
-                    f"My initial prediction was {codes_str}, so I considered the following:"
-                )
-            else:
-                iteration_header = (
-                    f"Based on this information I predicted {codes_str}, "
-                    f"so I considered the following:"
-                )
-            lines = "".join(
-                line_template.format(
-                    instruction_id=instr.instruction_id,
-                    type=instr.type,
-                    target_codes=",".join(instr.target_codes),
-                    instruction_text=instr.instruction_text,
-                )
-                for instr in instructions
-            ).rstrip()
-            blocks.append(
-                iter_block_template.format(
-                    iteration_header=iteration_header,
-                    instruction_lines=lines,
-                )
-            )
-
-        content = "\n\n".join(blocks).rstrip()
-        return load_prompt("think_block").format(content=content)
+        return messages, coding_review
 
     # ---------------------------------------------------------- vLLM bridge
     async def _call_vllm_batch(
         self, messages_list: List[List[Dict[str, str]]]
-    ) -> List[str]:
-        """Send `messages_list` concurrently to the vLLM server."""
-        from src.inference import run_inference_messages
+    ) -> Tuple[List[str], List[str]]:
+        """Send `messages_list` concurrently to the vLLM server.
 
-        guided = self.config.get("inference", {}).get("guided_decoding", False)
-        schema = get_schema() if guided else None
+        Returns (responses, thinking_list). thinking_list contains the model's
+        reasoning_content per response (empty strings when thinking=False).
+        """
+        from src.inference import run_inference_messages, run_inference_messages_with_thinking
 
-        cfg = {
-            "model": {"name": self.model, "api_base": self.api_base},
-            "inference": {
-                "temperature": self.temperature,
-                "max_tokens": self.max_tokens,
-                "guided_decoding": guided,
-                "concurrency": self.config.get("inference", {}).get("concurrency", 64),
-            },
-            "job_name": self.config.get("job_name", "local"),
-            "k8s": self.config.get("k8s", {}),
-        }
-        responses = await run_inference_messages(cfg, messages_list, schema)
+        cfg = self._build_inference_config()
+        schema = get_schema(self.instruction_reasoning) if cfg["inference"]["guided_decoding"] else None
+        if self.thinking:
+            responses, thinking_list = await run_inference_messages_with_thinking(cfg, messages_list, schema)
+        else:
+            responses = await run_inference_messages(cfg, messages_list, schema)
+            thinking_list = [""] * len(responses)
         if len(responses) != len(messages_list):
             raise RuntimeError(
                 f"vLLM returned {len(responses)} responses for {len(messages_list)} prompts"
             )
-        return responses
+        return responses, thinking_list
+
+    def _build_inference_config(self) -> Dict[str, Any]:
+        inf_cfg = self.config.get("inference", {})
+        built: Dict[str, Any] = {
+            "model": {"name": self.model, "api_base": self.api_base},
+            "inference": {
+                "temperature": self.temperature,
+                "max_tokens": self.max_tokens,
+                "guided_decoding": inf_cfg.get("guided_decoding", False),
+                "concurrency": inf_cfg.get("concurrency", 64),
+                "thinking": self.thinking,
+            },
+            "job_name": self.config.get("job_name", "local"),
+            "k8s": self.config.get("k8s", {}),
+        }
+        if "reasoning_budget" in inf_cfg:
+            built["inference"]["reasoning_budget"] = inf_cfg["reasoning_budget"]
+        return built

@@ -12,6 +12,7 @@ from pathlib import Path
 
 # Repo root is two levels up from this file: src/utils/prompt_loader.py
 PROMPTS_DIR = Path(__file__).resolve().parents[2] / "configs" / "prompts"
+CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
 
 
 @lru_cache(maxsize=None)
@@ -25,20 +26,56 @@ def load_prompt(name: str) -> str:
     return path.read_text()
 
 
+# General coding guidelines — loaded once, injected into every system prompt.
+# Edit configs/general_guidelines.txt to add or revise principles without any
+# code changes. Set to an empty string to disable.
+_GUIDELINES_PATH = CONFIGS_DIR / "general_guidelines.txt"
+GENERAL_GUIDELINES: str = _GUIDELINES_PATH.read_text()
+
 # Canonical JSON example we ask the Generator to follow. Defined here
 # (not in the prompt file) so it stays in sync with the pydantic schema.
-GENERATOR_JSON_EXAMPLE = json.dumps(
-    [
-        {
-            "icd_code": "I10",
-            "reason": "Patient has persistent hypertension noted in the admission note.",
-        },
-        {
-            "icd_code": "E11.9",
-            "reason": "Elevated blood glucose levels indicating type 2 diabetes mellitus.",
-        },
-    ],
-    indent=2,
+_EXAMPLE_DIAGNOSES = [
+    {
+        "icd_code": "I10",
+        "reason": "Patient has persistent hypertension noted in the admission note.",
+    },
+    {
+        "icd_code": "E11.9",
+        "reason": "Elevated blood glucose levels; type 2 diabetes documented in PMH.",
+    },
+    {
+        "icd_code": "G47.33",
+        "reason": "Obstructive sleep apnea with documented nightly CPAP use.",
+    },
+]
+
+
+def build_json_example(instruction_reasoning: bool = True) -> str:
+    """Build the JSON example injected into the generator system prompt.
+
+    When instruction_reasoning=False the field is omitted so the prompt
+    matches the guided-decoding schema the model is actually constrained to.
+    """
+    obj: dict = {}
+    if instruction_reasoning:
+        obj["instruction_reasoning"] = (
+            "[FP] E11 91% FP — 'type 2 diabetes, on metformin' in PMH → keeping. "
+            "[Semantic] G47.33 if CPAP documented — 'uses CPAP nightly for OSA' → adding."
+        )
+    obj["diagnoses"] = _EXAMPLE_DIAGNOSES
+    return json.dumps(obj, indent=2)
+
+
+# Kept for backward compatibility with any import that uses the constant directly.
+GENERATOR_JSON_EXAMPLE = build_json_example(instruction_reasoning=True)
+
+# Field-description bullet injected into the system prompt when instruction_reasoning is on.
+INSTRUCTION_REASONING_FIELD_DOC = (
+    "\n  - instruction_reasoning: reason through every item in the LAST\n"
+    "    <coding_review> block (earlier blocks are context only). FP warning →\n"
+    "    state evidence found and keep/drop decision. FN warning or semantic\n"
+    "    instruction → state whether a supporting cue exists; dismiss and note\n"
+    "    if not. One phrase per item, ≤15 words. Leave \"\" if no block.\n"
 )
 
 

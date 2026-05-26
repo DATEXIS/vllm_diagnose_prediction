@@ -7,11 +7,15 @@ WORKDIR /app
 # Copy the requirements file into the container
 COPY requirements.txt .
 
-# Install any essential build tools and the Python packages
+# Install any essential build tools and the Python packages.
+# torch must be installed before requirements.txt so the CUDA wheel is not
+# replaced by the CPU-only default that pip would otherwise pull in as a
+# transitive dependency of sentence-transformers.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu121 \
+    && pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu121
 
 # Copy the application code, prompt templates, and data.
 # /app/config/config.yaml is mounted by the K8s ConfigMap; /app/configs/
@@ -19,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY src/ src/
 COPY configs/prompts/ configs/prompts/
 COPY configs/admission_note_sections.yaml configs/admission_note_sections.yaml
+COPY configs/general_guidelines.txt configs/general_guidelines.txt
 COPY data/mimic data/mimic
 COPY data/cooccurrence.parquet data/cooccurrence.parquet
 

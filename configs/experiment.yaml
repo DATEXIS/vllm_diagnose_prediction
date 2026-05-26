@@ -6,17 +6,20 @@
 
 # Run identification
 job_name: "merlin2"
-run_name: "merlin2-opus-code"
+run_name: "merlin2-thinking"
 
 log_level: "INFO"
 
 # Inference parameters
 inference:
-  temperature: 0.2
-  max_tokens: 3000
-  reasoning_budget: 1024
+  temperature: 0.6             # 0.6 + top_p 0.95 recommended for thinking mode; 0.2 for non-thinking
+  top_p: 0.95
+  max_tokens: 4096
+  reasoning_budget: 3000
   concurrency: 64
-  guided_decoding: true
+  guided_decoding: false
+  instruction_reasoning: false  # include instruction_reasoning field in JSON schema + prompt example
+  thinking: true                # adds --enable-reasoning --reasoning-parser=qwen3 to vLLM server args
 
 # Dataset configuration
 data:
@@ -47,31 +50,63 @@ k8s:
 # MERLIN 2 configuration -- defaults locked per MERLIN2_SPEC.md §6.
 merlin2:
   enabled: true
-  sim_note_threshold: 0.85
-  sim_icd_threshold: 0.70
-  fpr_threshold: 0.5
-  fnr_threshold: 0.5
-  min_support: 2
-  convergence_threshold: 0.9
-  max_iterations: 4
-  max_tokens_budget: 2000        # cumulative token cap across all iterations (Verifier halt)
-  per_iteration_token_budget: 400  # token cap per single retrieval call (Retriever)
-  threshold_budget_fraction: 0.5   # fraction of per_iteration_token_budget for FPR/FNR warnings
-  learning_rate: 1.2
+
+  # --- Retrieval ---
+  sim_note_threshold: 0.75
+  sim_icd_threshold: 0.75
+  fpr_threshold: 0.85               # reduced false prunes; codes 0.75-0.84 were often true positives
+  fnr_threshold: 0.6
+  min_support: 2                    # minimum case count before a code is eligible for code_stats
+  convergence_threshold: 0.95
+  max_iterations: 5                 # increased; budget_exhausted was cutting off improving cases early
+  dedup_cluster_threshold: 0.90     # collapse semantic instructions with embedding cosine sim >= this;
+                                    # 1.0 disables. Tune via retrieval log output.
+  max_instructions_per_code: 1      # keep at most this many semantic instructions per target ICD code
+                                    # (by efficacy, after cluster dedup). null disables.
+
+  # --- coding_review history depth ---
+  max_history_depth: 2               # render only the last N iteration blocks inside <coding_review>.
+                                    # Older blocks are dropped (their instructions are already baked
+                                    # into the current prediction). Prevents unbounded growth of the
+                                    # prompt at late iterations and eliminates T=4+ parse failures.
+                                    # null = no cap (original behaviour, not recommended).
+
+  # --- Per-type instruction count caps (primary retrieval budget control) ---
+  max_fp_warnings: 5                # FP gate cap per iteration; highest fpr first
+  max_fn_warnings: 0                # FN gate cap per iteration; highest fnr first
+  max_sem_instructions: 10          # semantic cap; sweet spot ~12-13 from run analysis
+  max_instructions_total: null      # optional hard ceiling across all three; null = uncapped
+
+  # --- Under-prediction guard ---
+  min_prediction_size: 3            # never halt on convergence/no-instructions if fewer codes than this
+
+  # --- Efficacy learning ---
+  update_efficacy: true             # set false on test/eval runs to freeze instruction scores
+  learning_rate: 0.3
+  rareness_aggregation: sqrt_mean         # how to aggregate per-code rareness into a case-level factor.
+                                    # mean:      average rarity; ignores how many rare codes are present.
+                                    # sum:       each rare code compounds; scales fully with code count.
+                                    # sqrt_mean: mean * sqrt(n_codes); rewards multiple rare codes
+                                    #            without fully scaling with total code count.
+                                    # max:       dominated by the single rarest code.
+                                    # geom_mean: smooth compromise between mean and max.
+
+  # --- Instruction store ---
   instructions_path: "data/instructions.parquet"
   instructions_artifact_name: "instructions_db"
-  instructions_artifact_version: "latest"
-  # Co-occurrence (FN retrieval). Built once per train split via
-  # `python scripts/build_cooccurrence.py --config configs/experiment.yaml`.
-  # `cooccurrence_threshold` is a *lift* threshold (P(a,b)/(P(a)P(b))).
+  instructions_artifact_version: "v5"
+
+  # --- Co-occurrence index (FN retrieval) ---
+  # Built once per train split: python scripts/build_cooccurrence.py --config configs/experiment.yaml
+  # cooccurrence_threshold is a lift threshold: P(a,b) / (P(a)*P(b))
   cooccurrence_path: "data/cooccurrence.parquet"
-  cooccurrence_threshold: 3.0
-  cooccurrence_top_k: 10
+  cooccurrence_threshold: 7.0       # was 5.0; lift=7 cuts FN hallucinations that fire at T=2+
+  cooccurrence_top_k: 3             # was 5; fewer candidates per seed given higher lift threshold
   cooccurrence_min_joint_count: 3
-  # Per-code threshold-warning stats. Loop B writes new entries; the
-  # Retriever synthesises FP/FN warning text at runtime from these.
-  # Frozen-rate semantics: codes already in the table are not overwritten
-  # on subsequent Loop-B passes (per MERLIN2_SPEC §3).
+
+  # --- Per-code threshold-warning stats ---
+  # Loop B writes new entries; Retriever synthesises FP/FN warning text at runtime.
+  # Frozen-rate semantics: existing rows are never overwritten (MERLIN2_SPEC §3).
   code_stats_path: "data/code_stats.parquet"
   code_stats_artifact_name: "code_stats"
   code_stats_artifact_version: "latest"

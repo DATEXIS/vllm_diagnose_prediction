@@ -29,7 +29,7 @@
   * `type` — `semantic` or `contrastive_swap`. Threshold-warning types (`fp_warning`, `fn_warning`) are reserved for runtime-synthesised instances and never appear in the persistent store.
   * `instruction_text` — the thinking-style content injected into the Generator's `<think>` block
   * `description` / `quote` — short text used as the embedding target for semantic retrieval (PubMedBERT)
-  * `target_codes` — 3-digit ICD codes the instruction relates to (one or more).
+  * `target_codes` — ICD codes the instruction relates to (one or more).
   * `source_hadm_ids` — list of `hadm_id`s the instruction was derived from. Non-empty for case-level instructions.
   * `efficacy_score` — running score; see *Efficacy Score Update Rule* below.
 * **CodeStats Schema (rows in `code_stats.parquet`):**
@@ -49,11 +49,13 @@
 * **Three retrieval paths, all OR'd at the per-instruction level:**
   * **Semantic path:** embed the admission note, fetch persistent instructions whose `description`/`quote` embedding has cosine similarity ≥ `sim_note_threshold`.
   * **FP gate (threshold, runtime-synthesised):** for each 3-digit code in the *previous iteration's* prediction, look up `code_stats[code].fpr`. If it is ≥ `fpr_threshold`, synthesise an `fp_warning` Instruction at retrieval time and emit it. Synthesised IDs are deterministic (md5 hash of `"fp_<code>"`, high-bit set) so the same warning keeps the same ID across iterations.
-  * **FN gate (threshold, runtime-synthesised, cooccurrence-driven):** expand the previous prediction via the cooccurrence index — for each predicted code, take the top-`cooccurrence_top_k` codes with `lift ≥ cooccurrence_threshold`. For each candidate in that expanded set, look up `code_stats[code].fnr`. If it is ≥ `fnr_threshold`, synthesise an `fn_warning` Instruction. The asymmetry with the FP gate is deliberate: an FN warning is about a code the model *should have* predicted but didn't, so gating on the predicted set would make it unreachable.
+  * **FN gate (threshold, runtime-synthesised, cooccurrence-driven):** expand the **T=0 (zero-shot) prediction** via the cooccurrence index — for each T=0 predicted code, take the top-`cooccurrence_top_k` codes with `lift ≥ cooccurrence_threshold`. For each candidate in that expanded set, look up `code_stats[code].fnr`. If it is ≥ `fnr_threshold`, synthesise an `fn_warning` Instruction. Seeds where `fpr ≥ fpr_threshold` are additionally excluded before expansion — emitting an FP warning and seeding FN expansion from the same code is contradictory. Codes already present in the current (latest) prediction are excluded from expansion results. **Why T=0 and not the latest prediction:** seeding from the growing predicted set causes cascade hallucinations — FP codes introduced by prior FN warnings become new seeds each iteration, compounding spurious expansions (e.g. precision collapsing from 0.50 → 0.09 by T=3 in observed failures). The T=0 prediction is instruction-uncontaminated and the most reliable seed set. The asymmetry with the FP gate is deliberate: an FN warning is about a code the model *should have* predicted but didn't, so gating on the predicted set would make it unreachable.
   * Both threshold gates are inactive at `t=0` (no prior prediction yet).
 * **Cooccurrence Index:** `lift(a, b) = N · joint(a,b) / (count(a) · count(b))` over training-set 3-digit ground-truth co-occurrence. Built once per train split via `scripts/build_cooccurrence.py`, frozen for retrieval. `min_joint_count` and `min_support` filter noise. Lift naturally biases toward rare codes via the `count(b)` denominator; no separate rare-code re-ranking is applied.
 * **Behavior at t=0:** The Generator runs **zero-shot** — no instructions retrieved, no `<think>` block prefilled. This produces a baseline prediction. From `t=1` onward, all three retrieval paths are active.
-* **Deduplication:** Instructions retrieved in earlier iterations of the same case are excluded from later iterations (but the originals stay in the prompt — see *Efficacy Score Update Rule*). Synthesised threshold warnings participate in dedup via their deterministic IDs.
+* **Deduplication:** Two kinds:
+  1. *Cross-iteration dedup* — instructions retrieved in earlier iterations of the same case are excluded from later iterations (but stay in the prompt — see *Efficacy Score Update Rule*). Synthesised threshold warnings participate via their deterministic IDs.
+  2. *Within-iteration cluster dedup* — after all three retrieval paths fire, semantic instructions whose stored embeddings have cosine similarity ≥ `dedup_cluster_threshold` are collapsed to the single highest-`efficacy_score` representative. Prevents the token budget from being consumed by near-duplicate instructions (e.g. four Z85 family-history rules all triggered by the same note section). Threshold warnings are never collapsed (they have no embedding). Setting `dedup_cluster_threshold = 1.0` disables this step.
 * **Budgeting:** Caps retrieval at `max_tokens_budget`, prioritising instructions with the highest `efficacy_score`. Synthesised threshold warnings always have `efficacy_score = 0.0`, so they only beat ineffective semantic instructions in priority order.
 
 ### Verifier (V)
@@ -97,7 +99,7 @@
 1. **Audit (case-level):** For each closed case, Meta-Verifier reads `(admission_note, prediction, ground_truth, discharge_note)` and emits contrastive instructions for missed or hallucinated codes. These are appended to `instructions.parquet`.
 2. **Audit (aggregate):** Recompute per-code FPR/FNR over the audited cases; for codes that cross the threshold AND meet `min_support`, emit a row to `code_stats.parquet` (one row per code, one of `fpr` / `fnr` set). Codes already present in the table are left untouched — frozen-rate semantics. The Retriever synthesises the warning text at runtime; nothing about the warning is persisted in the instructions store.
 3. **Database Maintenance:** A clustering routine groups *persistent* instructions by `target_codes` and `type`. Redundant instructions are candidates for merge/summarisation via LLM, combining their `efficacy_score`. The `code_stats.parquet` table doesn't need clustering — it's already keyed by code.
-   * **Open question (to be tested):** LLM-based merging may degrade the `description`/`quote` embedding such that semantic retrieval misses cases the originals would have caught. Treat merging as an ablation, not a default.
+   * **Relationship to within-iteration cluster dedup:** the Retriever's `dedup_cluster_threshold` step already prevents near-duplicates from consuming the token budget at inference time, so aggressive Loop B merging is less urgent. Treat LLM-based merging as an ablation rather than a default — it risks degrading `description`/`quote` embeddings such that semantic retrieval misses cases the originals would have caught.
 
 ---
 
@@ -199,17 +201,7 @@ No formal test suite. Validate changes by running a small sample:
 - Results should contain a table that have important fields. Use field to look if json output is correct. If it was an extraction error or do response did not contain one.
 - Do we need to adapt the prompt?
 
-## Code Philosophy
-
-This is **research code**, not production software:
-
-- **Fail fast**: Code crashes loudly on errors instead of silently handling them
-- **Explicit is better**: No empty default values, no silent returns
-- **Easier debugging**: When something breaks, you see the full traceback immediately
-- **Crash is fine**: If the model fails to parse, the API returns an error, or wandb fails - the pipeline should crash so you can fix it
-
-This approach makes the code easier to read and debug during research iterations.
-
+  
 ---
 
 ## 6. Implementation Reference
@@ -240,9 +232,11 @@ Tuned empirically from here; locked in as the first run's config.
 | `sim_icd_threshold` | 0.8 | Retriever — ICD-reason semantic path (cosine similarity cutoff; set lower than `sim_note_threshold` to admit more ICD-driven retrievals) |
 | `fpr_threshold` | 0.5 | Retriever — FP gate (synthesise fp_warning when `code_stats[c].fpr ≥ this`) |
 | `fnr_threshold` | 0.5 | Retriever — FN gate (synthesise fn_warning when `code_stats[c].fnr ≥ this`) |
+| `dedup_cluster_threshold` | 0.90 | Retriever — within-iteration cluster dedup: drop semantic instructions whose embedding cosine sim to an already-selected instruction is ≥ this. 1.0 disables. |
+| `max_instructions_per_code` | 2 | Retriever — per-code cap: keep at most this many semantic instructions per target ICD code (by efficacy). `null` disables. Applied after cluster dedup. |
 | `min_support` | 3 | Meta-Verifier — minimum case count before a code is eligible for a `code_stats` row |
 | `cooccurrence_threshold` | 3.0 | Retriever — minimum lift to admit a code into the FN candidate set |
-| `cooccurrence_top_k` | 20 | Retriever — top-K cap on cooccurring codes per predicted code (after threshold filter) |
+| `cooccurrence_top_k` | 5 | Retriever — top-K cap on cooccurring codes per T=0 predicted code (after threshold filter); lowered from 20 to reduce FN candidate surface area |
 | `cooccurrence_min_joint_count` | 3 | Cooccurrence builder — minimum joint count per pair (noise filter) |
 | `convergence_threshold` | 0.9 | Verifier — Jaccard similarity between consecutive predictions to halt |
 | `max_iterations` | 5 | Verifier — hard cap on iterations per case |
@@ -284,20 +278,30 @@ fire i IF cosine(note_embedding, i.embedding) >= sim_note_threshold      # note-
 fire i IF cosine(reason_embedding, i.embedding) >= sim_icd_threshold    # ICD-reason path
 ```
 
-For each 3-digit code `c` in the previous prediction:
+For each 3-digit code `c` in the previous (latest) prediction:
 
 ```
 synthesise fp_warning(c) IF code_stats[c].fpr >= fpr_threshold
 ```
 
-For each 3-digit code `c` in the cooccurring set (top-K by lift over the previous prediction, threshold `cooccurrence_threshold`, with the previous prediction itself excluded):
+Build the FN seed set from the **T=0 (zero-shot) prediction**, minus any seed where `fpr >= fpr_threshold`:
+
+```
+fn_seeds = {c in t0_prediction | code_stats[c].fpr < fpr_threshold}  # or no fpr entry
+```
+
+For each 3-digit code `c` in the cooccurring set (top-K by lift over `fn_seeds`, threshold `cooccurrence_threshold`, excluding codes already in the current prediction):
 
 ```
 synthesise fn_warning(c) IF code_stats[c].fnr >= fnr_threshold
 ```
 
+**Rationale for T=0 seeds:** using the growing predicted set causes cascade hallucinations — FP codes introduced by FN warnings in iteration t become expansion seeds at t+1, compounding spurious suggestions each iteration. The T=0 prediction is instruction-uncontaminated and stable across all iterations of a case. The additional FPR filter prevents the contradiction of expanding from a code the FP gate is simultaneously flagging for removal.
+
 Then:
 - Deduplicate by `instruction_id` (synthesised IDs are deterministic so dedup is stable across iterations).
+- **Cluster-deduplicate semantic instructions:** collapse near-duplicates whose stored embeddings have cosine similarity ≥ `dedup_cluster_threshold`, keeping the highest-`efficacy_score` representative. Threshold warnings are excluded (no embedding). Setting `dedup_cluster_threshold = 1.0` disables this step.
+- **Per-code cap:** after cluster dedup, keep at most `max_instructions_per_code` semantic instructions per target ICD code (by efficacy). Catches "same code, different conditions" redundancy that embedding similarity alone won't collapse. Instructions targeting multiple codes count against each of them. `null` disables.
 - Prioritise by `efficacy_score` descending (synthesised threshold warnings tie at `0.0`).
 - Respect `max_tokens_budget`.
 

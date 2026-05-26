@@ -1,3 +1,7 @@
+# torch must be installed from the CUDA wheel (see Dockerfile); pinning here
+# prevents pip from downgrading to the CPU-only wheel when resolving
+# sentence-transformers dependencies.
+torch>=2.0.0
 vllm
 openai
 aiohttp
