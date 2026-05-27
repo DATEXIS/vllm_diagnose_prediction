@@ -5,7 +5,6 @@ Two retrieval paths, OR'd:
     persisted Instructions only).
   * Threshold — synthesised at runtime from the per-code stats table:
       - FP gate: predicted_set ∩ {code: code_stats[code].fpr >= thr}
-      - FN gate: cooccurring_set ∩ {code: code_stats[code].fnr >= thr}
 
 We monkeypatch encode_single_text to make the semantic path deterministic.
 """
@@ -20,7 +19,6 @@ from src.merlin2.retriever import (
     SEM_ALLERGIES,
     SEM_COMPLAINT,
     SEM_NOTE,
-    THRESHOLD_FNR,
     THRESHOLD_FPR,
     Retriever,
     is_semantic_path,
@@ -46,9 +44,6 @@ def _semantic(id_, target_codes, embedding, description="d", text="t", efficacy=
 def _stat_fp(code, fpr, support_pred=10):
     return CodeStat(code=code, fpr=fpr, fnr=None, support_pred=support_pred, support_true=0)
 
-
-def _stat_fn(code, fnr, support_true=10):
-    return CodeStat(code=code, fpr=None, fnr=fnr, support_pred=0, support_true=support_true)
 
 
 @pytest.fixture
@@ -118,126 +113,6 @@ class TestFPThresholdPath:
         result = r.retrieve("note", previous_predicted_codes=["I10"])
         assert result.instructions == []
 
-
-class TestFNCooccurrencePath:
-    """FN warnings fire when their target code is in the cooccurring set
-    of the previous prediction, NOT when it is the prediction itself."""
-
-    def test_fn_warning_fires_when_target_cooccurs_with_predicted(self, patched_encoder):
-        patched_encoder.return_value = [0.0, 0.0]
-        # Predicted: I10 (hypertension). Cooccurring (high lift): N18 (CKD).
-        r = Retriever(
-            sim_note_threshold=0.99, sim_icd_threshold=0.99,
-            fnr_threshold=0.4,
-            cooccurrence_index={"I10": [("N18", 5.0)]},
-            code_stats={"N18": _stat_fn("N18", 0.6, support_true=15)},
-        )
-        result = r.retrieve("note", previous_predicted_codes=["I10"])
-        assert len(result.instructions) == 1
-        assert result.instructions[0].type == InstructionType.FN_WARNING
-        assert result.instructions[0].target_codes == ["N18"]
-        assert result.events[0].path == THRESHOLD_FNR
-        assert result.events[0].trigger_value == pytest.approx(0.6)
-        assert result.instructions[0].instruction_id == synthetic_instruction_id("fn", "N18")
-
-    def test_fn_warning_does_not_fire_when_no_cooccurrence(self, patched_encoder):
-        patched_encoder.return_value = [0.0, 0.0]
-        r = Retriever(
-            sim_note_threshold=0.99, sim_icd_threshold=0.99,
-            fnr_threshold=0.4,
-            cooccurrence_index={},  # I10 has no cooccurring entries
-            code_stats={"N18": _stat_fn("N18", 0.6)},
-        )
-        result = r.retrieve("note", previous_predicted_codes=["I10"])
-        assert result.instructions == []
-
-    def test_fn_warning_does_not_fire_when_target_not_in_cooccurring_set(
-        self, patched_encoder
-    ):
-        patched_encoder.return_value = [0.0, 0.0]
-        # I10 cooccurs with E11, not N18 — FN for N18 must not fire even
-        # though N18 has a high FNR in code_stats.
-        r = Retriever(
-            sim_note_threshold=0.99, sim_icd_threshold=0.99,
-            fnr_threshold=0.4,
-            cooccurrence_index={"I10": [("E11", 5.0)]},
-            code_stats={"N18": _stat_fn("N18", 0.6)},
-        )
-        result = r.retrieve("note", previous_predicted_codes=["I10"])
-        assert result.instructions == []
-
-    def test_fn_warning_does_not_fire_below_fnr_threshold(self, patched_encoder):
-        patched_encoder.return_value = [0.0, 0.0]
-        r = Retriever(
-            sim_note_threshold=0.99, sim_icd_threshold=0.99,
-            fnr_threshold=0.5,
-            cooccurrence_index={"I10": [("N18", 5.0)]},
-            code_stats={"N18": _stat_fn("N18", 0.3)},  # below threshold
-        )
-        result = r.retrieve("note", previous_predicted_codes=["I10"])
-        assert result.instructions == []
-
-    def test_fn_warning_does_not_fire_when_code_not_in_code_stats(self, patched_encoder):
-        # Cooccurrence says I10 → N18, but code_stats has no entry for N18
-        # (i.e. its FNR never crossed the threshold during Loop B).
-        patched_encoder.return_value = [0.0, 0.0]
-        r = Retriever(
-            sim_note_threshold=0.99, sim_icd_threshold=0.99,
-            fnr_threshold=0.4,
-            cooccurrence_index={"I10": [("N18", 5.0)]},
-            code_stats={},
-        )
-        result = r.retrieve("note", previous_predicted_codes=["I10"])
-        assert result.instructions == []
-
-    def test_fn_warning_text_names_triggering_predicted_codes(self, patched_encoder):
-        # The warning text must tell the model which of its own predicted codes
-        # co-occur with the missed code — so it understands *why* the warning fired.
-        patched_encoder.return_value = [0.0, 0.0]
-        r = Retriever(
-            sim_note_threshold=0.99, sim_icd_threshold=0.99,
-            fnr_threshold=0.4,
-            cooccurrence_index={"I10": [("N18", 5.0)], "E11": [("N18", 4.0)]},
-            code_stats={"N18": _stat_fn("N18", 0.6, support_true=15)},
-        )
-        result = r.retrieve("note", previous_predicted_codes=["I10", "E11"])
-        assert len(result.instructions) == 1
-        text = result.instructions[0].instruction_text
-        # Both trigger codes must appear in the warning text
-        assert "I10" in text
-        assert "E11" in text
-
-    def test_fn_warning_objects_are_independent_across_cases(self, patched_encoder):
-        # Each case must get its own Instruction object with its own trigger-code
-        # text — not a shared mutable reference that can be overwritten by a
-        # later case in the same batch.
-        patched_encoder.return_value = [0.0, 0.0]
-        r = Retriever(
-            sim_note_threshold=0.99, sim_icd_threshold=0.99,
-            fnr_threshold=0.4,
-            cooccurrence_index={"I10": [("N18", 5.0)], "K92": [("N18", 4.0)]},
-            code_stats={"N18": _stat_fn("N18", 0.6, support_true=15)},
-        )
-        # Case 1: triggered via I10
-        result1 = r.retrieve("note", previous_predicted_codes=["I10"])
-        instr1 = result1.instructions[0]
-
-        # Case 2: triggered via K92 (different patient, different prediction)
-        result2 = r.retrieve("note", previous_predicted_codes=["K92"])
-        instr2 = result2.instructions[0]
-
-        # Each result must have correct trigger codes for its own case
-        assert "K92" in instr2.instruction_text
-        assert "I10" not in instr2.instruction_text
-
-        # Critical: result1's object must NOT have been mutated by case 2's retrieval
-        assert "I10" in instr1.instruction_text, (
-            "Case 1's FN warning was mutated by case 2 — objects are shared instead of independent"
-        )
-        assert "K92" not in instr1.instruction_text
-
-        # Confirm they are distinct objects (no aliasing)
-        assert instr1 is not instr2
 
 
 class TestSyntheticInstructionCaching:
@@ -377,7 +252,6 @@ class TestSectionBasedSemanticPath:
         assert is_semantic_path(SEM_ICD)
         assert is_semantic_path(SEM_NOTE)
         assert not is_semantic_path(THRESHOLD_FPR)
-        assert not is_semantic_path(THRESHOLD_FNR)
 
 
 class TestDeduplication:
@@ -394,7 +268,7 @@ class TestDeduplication:
 class TestPriorityAndBudget:
     def test_higher_efficacy_first(self, patched_encoder):
         patched_encoder.return_value = [1.0, 0.0]
-        r = Retriever(sim_note_threshold=0.5, sim_icd_threshold=0.5, max_tokens_budget=10_000)
+        r = Retriever(sim_note_threshold=0.5, sim_icd_threshold=0.5)
         r.load_instructions(
             [
                 _semantic(1, ["E11"], [1.0, 0.0], efficacy=0.1),
@@ -403,20 +277,6 @@ class TestPriorityAndBudget:
         )
         result = r.retrieve("note", previous_predicted_codes=None)
         assert [i.instruction_id for i in result.instructions] == [2, 1]
-
-    def test_budget_limits_selection(self, patched_encoder):
-        patched_encoder.return_value = [1.0, 0.0]
-        long_text = "word " * 50
-        r = Retriever(sim_note_threshold=0.5, sim_icd_threshold=0.5, max_tokens_budget=20)
-        r.load_instructions(
-            [
-                _semantic(1, ["E11"], [1.0, 0.0], text=long_text, efficacy=1.0),
-                _semantic(2, ["E11"], [1.0, 0.0], text=long_text, efficacy=0.5),
-            ]
-        )
-        result = r.retrieve("note", previous_predicted_codes=None)
-        assert len(result.instructions) <= 1
-        assert result.skipped_for_budget >= 1
 
 
 class TestClusterDeduplication:

@@ -14,7 +14,6 @@ from src.merlin2.retriever import Retriever
 from src.merlin2.verifier import Verifier
 from src.meta_verifier.code_stats import load_code_stats
 from src.utils.admission_note_parser import load_section_config
-from src.utils.cooccurrence import load_cooccurrence_index
 
 
 def build_generator(config: Dict[str, Any]) -> Generator:
@@ -36,11 +35,6 @@ def build_generator(config: Dict[str, Any]) -> Generator:
 
 def build_retriever(config: Dict[str, Any]) -> Retriever:
     m2_cfg = config.get("merlin2", {})
-    cooccurrence_index = load_cooccurrence_index(
-        path=m2_cfg.get("cooccurrence_path", "data/cooccurrence.parquet"),
-        lift_threshold=float(m2_cfg.get("cooccurrence_threshold", 3.0)),
-        top_k=int(m2_cfg.get("cooccurrence_top_k", 20)),
-    )
     code_stats = load_code_stats(m2_cfg.get("code_stats_path", "data/code_stats.parquet"))
     section_cfg = load_section_config(
         m2_cfg.get("admission_note_sections_path", "configs/admission_note_sections.yaml")
@@ -49,14 +43,11 @@ def build_retriever(config: Dict[str, Any]) -> Retriever:
         sim_note_threshold=m2_cfg.get("sim_note_threshold", 0.8),
         sim_icd_threshold=m2_cfg.get("sim_icd_threshold", 0.8),
         fpr_threshold=m2_cfg.get("fpr_threshold", 0.5),
-        fnr_threshold=m2_cfg.get("fnr_threshold", 0.5),
         dedup_cluster_threshold=m2_cfg.get("dedup_cluster_threshold", 1.0),
         max_instructions_per_code=m2_cfg.get("max_instructions_per_code"),
         max_fp_warnings=m2_cfg.get("max_fp_warnings"),
-        max_fn_warnings=m2_cfg.get("max_fn_warnings"),
         max_sem_instructions=m2_cfg.get("max_sem_instructions"),
         max_instructions_total=m2_cfg.get("max_instructions_total"),
-        cooccurrence_index=cooccurrence_index,
         code_stats=code_stats,
         section_names=section_cfg.get("sections", []),
         ignore_phrases=section_cfg.get("ignore_phrases", []),

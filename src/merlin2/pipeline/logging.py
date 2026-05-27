@@ -6,9 +6,6 @@ Renders something like:
       Pred:   X, Y, Z
       carry:  N from prior iterations
 
-      FNR – missed codes:
-        M33  fnr=1.00  co-occurs-with: Z82, K86
-
       FPR – rethink codes:
         B18  fpr=1.00
 
@@ -23,8 +20,8 @@ from __future__ import annotations
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from src.merlin2.retriever import SEM_ICD, THRESHOLD_FNR, THRESHOLD_FPR, is_semantic_path
-from src.merlin2.retriever_events import RetrievalResult
+from src.merlin2.retriever import SEM_ICD, THRESHOLD_FPR, is_semantic_path
+from src.merlin2.retriever import RetrievalResult
 from src.meta_verifier.schemas import Instruction
 
 logger = logging.getLogger(__name__)
@@ -71,12 +68,9 @@ def _build_log_lines(
 
 
 def _render_retrieval_groups(retrieval: RetrievalResult) -> List[str]:
-    fnr_lines, fpr_lines, sem_by_section, sem_icd_lines = _classify_events(retrieval)
+    fpr_lines, sem_by_section, sem_icd_lines = _classify_events(retrieval)
 
     lines: List[str] = []
-    if fnr_lines:
-        lines.append("  FNR – missed codes:")
-        lines.extend(fnr_lines)
     if fpr_lines:
         lines.append("  FPR – rethink codes:")
         lines.extend(fpr_lines)
@@ -91,7 +85,6 @@ def _render_retrieval_groups(retrieval: RetrievalResult) -> List[str]:
 
 def _classify_events(retrieval: RetrievalResult):
     ev_by_id = {ev.instruction_id: ev for ev in retrieval.events}
-    fnr_lines: List[str] = []
     fpr_lines: List[str] = []
     sem_by_section: Dict[str, List[str]] = {}
     sem_icd_lines: List[str] = []
@@ -103,13 +96,7 @@ def _classify_events(retrieval: RetrievalResult):
         codes_tag = ", ".join(ev.target_codes) if ev.target_codes else "?"
         snippet = (instr.instruction_text or "")[:70].replace("\n", " ")
 
-        if ev.path == THRESHOLD_FNR:
-            cooccur = (
-                f"  co-occurs-with: {', '.join(sorted(ev.trigger_codes))}"
-                if ev.trigger_codes else ""
-            )
-            fnr_lines.append(f"    {codes_tag:<6}  fnr={ev.trigger_value:.2f}{cooccur}")
-        elif ev.path == THRESHOLD_FPR:
+        if ev.path == THRESHOLD_FPR:
             fpr_lines.append(f"    {codes_tag:<6}  fpr={ev.trigger_value:.2f}")
         elif ev.path == SEM_ICD:
             sem_icd_lines.append(
@@ -119,4 +106,4 @@ def _classify_events(retrieval: RetrievalResult):
             sem_by_section.setdefault(ev.path, []).append(
                 f"    #{instr.instruction_id}  [{codes_tag}]  sim={ev.trigger_value:.2f}  \"{snippet}\""
             )
-    return fnr_lines, fpr_lines, sem_by_section, sem_icd_lines
+    return fpr_lines, sem_by_section, sem_icd_lines

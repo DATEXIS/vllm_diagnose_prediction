@@ -10,11 +10,11 @@ onward retrieval is active. Phase-level orchestration lives in main.py.
 
 This file is intentionally thin. Heavy lifting lives in sibling modules:
 
-  * pipeline_state      — CaseState / PipelineCaseResult + small helpers
-  * pipeline_builders   — Generator / Retriever / Verifier construction
-  * pipeline_embedding  — batched note + reason embedding
-  * pipeline_efficacy   — efficacy-score updates
-  * pipeline_logging    — DEBUG per-wave structured log
+  * state      — CaseState / PipelineCaseResult + small helpers
+  * builders   — Generator / Retriever / Verifier construction
+  * embedding  — batched note + reason embedding
+  * efficacy   — efficacy-score updates
+  * logging    — DEBUG per-wave structured log
 """
 
 from __future__ import annotations
@@ -23,11 +23,11 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from src.merlin2.generator import Generator, GenerateRequest, GenerateResult
-from src.merlin2.pipeline_builders import build_generator, build_retriever, build_verifier
-from src.merlin2.pipeline_efficacy import update_efficacy_scores
-from src.merlin2.pipeline_embedding import BatchedEmbeddings, embed_cases
-from src.merlin2.pipeline_logging import log_wave_inputs
-from src.merlin2.pipeline_state import (
+from .builders import build_generator, build_retriever, build_verifier
+from .efficacy import update_efficacy_scores
+from .embedding import BatchedEmbeddings, embed_cases
+from .logging import log_wave_inputs
+from .state import (
     CaseState, PipelineCaseResult, finalize_case, three_digit_codes,
 )
 from src.merlin2.retriever import RetrievalResult, Retriever
@@ -283,10 +283,6 @@ class MERLINPipeline:
             note_sections=s.note_sections or None,
             section_embeddings=batch.section_embeddings(case_idx),
             reason_embeddings=batch.reason_embeddings(case_idx),
-            # Pass the T=0 zero-shot prediction as the stable FN expansion seed.
-            # predictions[0] is always the zero-shot result. Using it instead of
-            # the latest prediction prevents cascade hallucinations.
-            t0_predicted_codes=three_digit_codes(s.predictions[0]),
         )
 
     # ---------------------------------------------------------------- misc helpers

@@ -21,7 +21,6 @@ class InstructionType:
     CONTRASTIVE_SWAP = "contrastive_swap"   # Case-level: predict X INSTEAD OF Y
     SEMANTIC = "semantic"                   # Case-level: generic note-grounded rule
     FP_WARNING = "fp_warning"               # Aggregate: high FPR on a single code
-    FN_WARNING = "fn_warning"               # Aggregate: high FNR on a single code
 
 
 class RichErrorInstruction(BaseModel):
@@ -69,11 +68,10 @@ class Instruction(BaseModel):
     semantic path. `fpr_at_creation` / `fnr_at_creation` are None and
     `efficacy_score` is updated online during Loop A.
 
-    Synthesised at runtime (FP_WARNING / FN_WARNING): produced by the
-    Retriever from the per-code stats table (`code_stats.parquet`); they
-    are NOT persisted in the instruction store. `target_codes` has length
-    1, `semantic_embedding` is None, `efficacy_score` is always 0.0
-    (threshold warnings have no efficacy tracking).
+    Synthesised at runtime (FP_WARNING): produced by the Retriever from
+    the per-code stats table (`code_stats.parquet`); NOT persisted in the
+    instruction store. `target_codes` has length 1, `semantic_embedding`
+    is None, `efficacy_score` is always 0.0.
     """
     instruction_id: int
 
@@ -82,8 +80,7 @@ class Instruction(BaseModel):
     # "add"    → FN correction: tell the Generator to include the code(s).
     # "remove" → FP correction: tell the Generator to drop the code(s).
     # Defaults to "add" for backward-compat with rows that pre-date this field.
-    # Synthesised threshold warnings (FP_WARNING / FN_WARNING) set this
-    # explicitly in the Retriever ("remove" / "add" respectively).
+    # Synthesised FP_WARNING sets this to "remove" in the Retriever.
     action: Literal["add", "remove"] = "add"
     # Admission note section this instruction is grounded in, or "icd_reasoning".
     # Empty string for legacy rows loaded from parquet (backward compat).

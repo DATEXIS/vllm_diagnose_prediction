@@ -14,8 +14,8 @@ The reward is `learning_rate * delta_F1 * rareness_factor` where:
 from __future__ import annotations
 
 from src.merlin2.generator import GenerateResult
-from src.merlin2.pipeline_state import CaseState, case_f1, three_digit_codes
-from src.merlin2.retriever_events import RetrievalResult
+from .state import CaseState, case_f1, three_digit_codes
+from src.merlin2.retriever import RetrievalResult
 from src.meta_verifier.schemas import InstructionType
 
 
@@ -37,6 +37,6 @@ def update_efficacy_scores(
 
     update = learning_rate * (f1 - prev_f1) * state.rareness_factor
     for instr in retrieval.instructions:
-        if instr.type in (InstructionType.FP_WARNING, InstructionType.FN_WARNING):
+        if instr.type == InstructionType.FP_WARNING:
             continue
         instr.efficacy_score = float(instr.efficacy_score + update)

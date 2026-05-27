@@ -13,7 +13,7 @@ import pandas as pd
 
 from src.data.evaluate import calculate_metrics, normalize_icd, sample_prf
 from src.merlin2.pipeline import CaseState, PipelineCaseResult
-from src.merlin2.retriever import THRESHOLD_FNR, THRESHOLD_FPR, is_semantic_path
+from src.merlin2.retriever import THRESHOLD_FPR, is_semantic_path
 
 
 # --------------------------------------------------------- per-iteration metrics
@@ -130,7 +130,6 @@ def flatten_retrieval_events(results: List[PipelineCaseResult]) -> pd.DataFrame:
                     "trigger_value": ev.trigger_value,
                     "efficacy_score": ev.efficacy_score,
                     "target_codes": ",".join(ev.target_codes),
-                    "trigger_codes": ",".join(ev.trigger_codes),
                 })
     return pd.DataFrame(rows)
 
@@ -148,8 +147,6 @@ def format_retrieval_log(result: PipelineCaseResult) -> str:
 
         --- Retrieved Instructions ---
         T=1:
-          Missed codes (FNR):
-          * M33    fnr=1.00  co-occurs-with: Z82, K86
           Rethink codes (FPR):
           * B18    fpr=1.00
           Semantic Similarity:
@@ -198,12 +195,9 @@ def _format_instruction_lines(result: PipelineCaseResult) -> List[str]:
         if not events:
             continue
         ev_by_id = {ev.instruction_id: ev for ev in events}
-        fnr_lines, fpr_lines, sem_lines = _classify_instruction_lines(instrs, ev_by_id)
+        fpr_lines, sem_lines = _classify_instruction_lines(instrs, ev_by_id)
 
         lines.append(f"\nT={t}:")
-        if fnr_lines:
-            lines.append("  Missed codes (FNR):")
-            lines.extend(fnr_lines)
         if fpr_lines:
             lines.append("  Rethink codes (FPR):")
             lines.extend(fpr_lines)
@@ -214,7 +208,7 @@ def _format_instruction_lines(result: PipelineCaseResult) -> List[str]:
 
 
 def _classify_instruction_lines(instrs, ev_by_id) -> tuple:
-    fnr_lines, fpr_lines, sem_lines = [], [], []
+    fpr_lines, sem_lines = [], []
     for instr in instrs:
         ev = ev_by_id.get(instr.instruction_id)
         if ev is None:
@@ -222,13 +216,7 @@ def _classify_instruction_lines(instrs, ev_by_id) -> tuple:
         codes_tag = ", ".join(ev.target_codes) if ev.target_codes else "?"
         snippet = (instr.instruction_text or "")[:90].replace("\n", " ")
 
-        if ev.path == THRESHOLD_FNR:
-            cooccur = (
-                f"  co-occurs-with: {', '.join(sorted(ev.trigger_codes))}"
-                if ev.trigger_codes else ""
-            )
-            fnr_lines.append(f"  * {codes_tag:<6}  fnr={ev.trigger_value:.2f}{cooccur}")
-        elif ev.path == THRESHOLD_FPR:
+        if ev.path == THRESHOLD_FPR:
             fpr_lines.append(f"  * {codes_tag:<6}  fpr={ev.trigger_value:.2f}")
         elif is_semantic_path(ev.path):
             section_tag = ev.path.removeprefix("sem_")
@@ -236,4 +224,4 @@ def _classify_instruction_lines(instrs, ev_by_id) -> tuple:
                 f"  * [{codes_tag}]  [{section_tag}]"
                 f"  sim={ev.trigger_value:.2f}  \"{snippet}\""
             )
-    return fnr_lines, fpr_lines, sem_lines
+    return fpr_lines, sem_lines

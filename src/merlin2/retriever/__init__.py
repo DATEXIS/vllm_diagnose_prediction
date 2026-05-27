@@ -1,6 +1,6 @@
 """MERLIN 2 Hybrid-Retriever (orchestration).
 
-Three retrieval paths, OR'd together at the per-instruction level:
+Two retrieval paths, OR'd together at the per-instruction level:
 
   * Semantic path        — embed each admission-note section, retrieve
                            instructions whose stored embedding has cosine
@@ -13,14 +13,10 @@ Three retrieval paths, OR'd together at the per-instruction level:
   * Threshold path       — synthesised at runtime from the per-code stats
                            table (no persistent rows). Inactive at t=0.
                            FP gate: code in predicted_set, fpr >= thr.
-                           FN gate: code cooccurs with the T=0 prediction,
-                                    fnr >= thr (excludes seeds where fpr
-                                    >= fpr_threshold to avoid contradictory
-                                    add-then-drop suggestions).
 
-After the three paths fire, semantic events are cluster-deduplicated and
-per-code-capped (see `retriever_dedup`). The remaining events are then
-admitted under per-type caps (FP, FN, semantic) and an optional total cap.
+After the paths fire, semantic events are cluster-deduplicated and
+per-code-capped (see `.dedup`). The remaining events are then admitted
+under per-type caps (FP, semantic) and an optional total cap.
 
 Constants, dataclasses, dedup helpers and synthetic-warning building live in
 sibling modules and are re-exported from here for backward compatibility:
@@ -37,22 +33,21 @@ import numpy as np
 
 # Re-export public symbols so external callers (tests, reporting, pipeline)
 # can keep importing them from `src.merlin2.retriever`.
-from src.merlin2.retriever_paths import (  # noqa: F401
+from .paths import (  # noqa: F401
     SEM_ALLERGIES, SEM_COMPLAINT, SEM_EXAM, SEM_FAMILY, SEM_ICD,
     SEM_ILLNESS, SEM_MED_HIST, SEM_MEDICATION, SEM_NOTE, SEM_SOCIAL,
-    THRESHOLD_FNR, THRESHOLD_FPR,
+    THRESHOLD_FPR,
     is_semantic_path, section_to_path,
 )
-from src.merlin2.retriever_events import RetrievalEvent, RetrievalResult  # noqa: F401
-from src.merlin2.retriever_synthetic import (  # noqa: F401
+from .events import RetrievalEvent, RetrievalResult  # noqa: F401
+from .synthetic import (  # noqa: F401
     SyntheticInstructionFactory, build_threshold_text, synthetic_instruction_id,
 )
-from src.merlin2.retriever_dedup import (
+from .dedup import (
     cluster_deduplicate_semantic_events, per_code_cap_semantic_events,
 )
 from src.meta_verifier.code_stats import CodeStat, CodeStatsIndex
 from src.meta_verifier.schemas import Instruction, InstructionType
-from src.utils.cooccurrence import CooccurrenceIndex, expand_cooccurring_with_parents
 from src.utils.embeddings import encode_single_text
 
 logger = logging.getLogger(__name__)
@@ -66,14 +61,11 @@ class Retriever:
         sim_note_threshold: float = 0.8,
         sim_icd_threshold: float = 0.8,
         fpr_threshold: float = 0.5,
-        fnr_threshold: float = 0.5,
         dedup_cluster_threshold: float = 1.0,
         max_instructions_per_code: Optional[int] = None,
         max_fp_warnings: Optional[int] = None,
-        max_fn_warnings: Optional[int] = None,
         max_sem_instructions: Optional[int] = None,
         max_instructions_total: Optional[int] = None,
-        cooccurrence_index: Optional[CooccurrenceIndex] = None,
         code_stats: Optional[CodeStatsIndex] = None,
         section_names: Optional[List[str]] = None,
         ignore_phrases: Optional[List[str]] = None,
@@ -81,14 +73,11 @@ class Retriever:
         self.sim_note_threshold = sim_note_threshold
         self.sim_icd_threshold = sim_icd_threshold
         self.fpr_threshold = fpr_threshold
-        self.fnr_threshold = fnr_threshold
         self.dedup_cluster_threshold = dedup_cluster_threshold
         self.max_instructions_per_code = max_instructions_per_code
         self.max_fp_warnings = max_fp_warnings
-        self.max_fn_warnings = max_fn_warnings
         self.max_sem_instructions = max_sem_instructions
         self.max_instructions_total = max_instructions_total
-        self._cooccurrence_index: CooccurrenceIndex = cooccurrence_index or {}
         self._code_stats: CodeStatsIndex = code_stats or {}
         self.section_names: List[str] = list(section_names or [])
         self.ignore_phrases: List[str] = list(ignore_phrases or [])
@@ -102,9 +91,6 @@ class Retriever:
         self._emb_norms: Optional[np.ndarray] = None
 
     # ------------------------------------------------------------------ config
-    def load_cooccurrence_index(self, index: CooccurrenceIndex) -> None:
-        """Replace the cooccurrence index. Empty dict disables the FN path."""
-        self._cooccurrence_index = index or {}
 
     def load_code_stats(self, stats: CodeStatsIndex) -> None:
         """Replace the per-code stats lookup. Empty dict disables the threshold path."""
@@ -131,6 +117,7 @@ class Retriever:
         return self._synthetic_factory.cache
 
     # ----------------------------------------------------- embedding cache
+
     def _invalidate_cache(self) -> None:
         self._emb_matrix = None
         self._emb_indices = []
@@ -157,6 +144,7 @@ class Retriever:
         return self._emb_matrix is not None and self._emb_matrix.size > 0
 
     # ------------------------------------------------------------ retrieval
+
     def retrieve(
         self,
         admission_note: str,
@@ -167,7 +155,6 @@ class Retriever:
         reason_embeddings: Optional[List[List[float]]] = None,
         note_sections: Optional[Dict[str, str]] = None,
         section_embeddings: Optional[Dict[str, List[float]]] = None,
-        t0_predicted_codes: Optional[List[str]] = None,
     ) -> RetrievalResult:
         """Retrieve instructions for one case at one iteration.
 
@@ -189,14 +176,12 @@ class Retriever:
             triggered, predicted_set_3digit, already_retrieved_ids,
             previous_reasons, reason_embeddings,
         )
-        self._fire_threshold_path(
-            triggered, previous_predicted_codes, t0_predicted_codes,
-            already_retrieved_ids,
-        )
+        self._fire_threshold_path(triggered, previous_predicted_codes, already_retrieved_ids)
 
         return self._select(triggered)
 
     # ----------------------------------------- semantic path (note sections)
+
     def _fire_semantic_path(
         self,
         triggered: Dict[int, RetrievalEvent],
@@ -240,6 +225,7 @@ class Retriever:
         return encode_single_text(section_text)
 
     # ----------------------------------------- semantic-reason path
+
     def _fire_semantic_reason_path(
         self,
         triggered: Dict[int, RetrievalEvent],
@@ -268,82 +254,26 @@ class Retriever:
                     predicted_set_3digit, already_retrieved_ids,
                 )
 
-    # ----------------------------------------- threshold path (FP / FN)
+    # ----------------------------------------- threshold path (FP)
+
     def _fire_threshold_path(
         self,
         triggered: Dict[int, RetrievalEvent],
         previous_predicted_codes: Optional[List[str]],
-        t0_predicted_codes: Optional[List[str]],
         already_retrieved_ids: Set[int],
     ) -> None:
         if not previous_predicted_codes or not self._code_stats:
             return
-
-        predicted_set = set(previous_predicted_codes)
-        self._fire_fp_gate(triggered, predicted_set, already_retrieved_ids)
-        self._fire_fn_gate(
-            triggered, predicted_set, t0_predicted_codes, already_retrieved_ids,
-        )
-
-    def _fire_fp_gate(
-        self,
-        triggered: Dict[int, RetrievalEvent],
-        predicted_set: Set[str],
-        already_retrieved_ids: Set[int],
-    ) -> None:
-        for code in predicted_set:
+        for code in previous_predicted_codes:
             stat = self._code_stats.get(code)
             if stat is None or stat.fpr is None or stat.fpr < self.fpr_threshold:
                 continue
             self._record_synthetic_event(
-                triggered, "fp", code, stat, THRESHOLD_FPR, stat.fpr,
-                already_retrieved_ids, trigger_codes=None,
+                triggered, code, stat, THRESHOLD_FPR, stat.fpr, already_retrieved_ids,
             )
-
-    def _fire_fn_gate(
-        self,
-        triggered: Dict[int, RetrievalEvent],
-        predicted_set: Set[str],
-        t0_predicted_codes: Optional[List[str]],
-        already_retrieved_ids: Set[int],
-    ) -> None:
-        # Seed from the T=0 (zero-shot) prediction only — using the growing
-        # predicted set causes cascade hallucinations as FP codes introduced
-        # by FN warnings seed further spurious expansions each iteration.
-        # Additionally exclude seeds whose own FPR exceeds the FP threshold:
-        # asking the model to drop a code AND seeding its co-occurring
-        # neighbours is contradictory.
-        fn_seed_base = set(t0_predicted_codes) if t0_predicted_codes is not None else predicted_set
-        fn_seed_codes = {c for c in fn_seed_base if not self._is_fp_flagged(c)}
-
-        parents_map = expand_cooccurring_with_parents(self._cooccurrence_index, list(fn_seed_codes))
-        # Drop codes already in the current prediction (may have been added by
-        # prior instructions in this same case).
-        parents_map = {k: v for k, v in parents_map.items() if k not in predicted_set}
-
-        if logger.isEnabledFor(logging.DEBUG) and fn_seed_codes != predicted_set:
-            excluded = predicted_set - fn_seed_codes
-            logger.debug(
-                "FN gate: seeding from %d T=0 codes (excluded %d from full prediction: %s)",
-                len(fn_seed_codes), len(excluded), ", ".join(sorted(excluded)),
-            )
-
-        for code, trigger_codes in parents_map.items():
-            stat = self._code_stats.get(code)
-            if stat is None or stat.fnr is None or stat.fnr < self.fnr_threshold:
-                continue
-            self._record_synthetic_event(
-                triggered, "fn", code, stat, THRESHOLD_FNR, stat.fnr,
-                already_retrieved_ids, trigger_codes=trigger_codes,
-            )
-
-    def _is_fp_flagged(self, code: str) -> bool:
-        stat = self._code_stats.get(code)
-        return (
-            stat is not None and stat.fpr is not None and stat.fpr >= self.fpr_threshold
-        )
 
     # ----------------------------------------- event recording
+
     def _cosine_hits(self, raw_embedding, threshold):
         emb = np.asarray(raw_embedding, dtype=np.float32)
         norm = float(np.linalg.norm(emb))
@@ -384,15 +314,13 @@ class Retriever:
     def _record_synthetic_event(
         self,
         triggered: Dict[int, RetrievalEvent],
-        kind: str,
         code: str,
         stat: CodeStat,
         path: str,
         trigger_value: float,
         already_retrieved_ids: Set[int],
-        trigger_codes: Optional[List[str]],
     ) -> None:
-        instr = self._synthetic_factory.get_or_create(kind, code, stat, trigger_codes)
+        instr = self._synthetic_factory.get_or_create(code, stat)
         if instr.instruction_id in already_retrieved_ids:
             return
         if instr.instruction_id in triggered:
@@ -403,15 +331,14 @@ class Retriever:
             trigger_value=trigger_value,
             efficacy_score=0.0,
             target_codes=[code],
-            trigger_codes=list(trigger_codes) if trigger_codes else [],
         )
 
     # ----------------------------------------- selection / count caps
+
     def _select(self, triggered: Dict[int, RetrievalEvent]) -> RetrievalResult:
         id_to_instr = {i.instruction_id: i for i in self.instructions}
 
-        fp_events  = _sorted_by_trigger(triggered, THRESHOLD_FPR)
-        fn_events  = _sorted_by_trigger(triggered, THRESHOLD_FNR)
+        fp_events      = _sorted_by_trigger(triggered, THRESHOLD_FPR)
         semantic_events = _sorted_semantic_by_efficacy(triggered)
 
         semantic_events = self._apply_cluster_dedup(semantic_events)
@@ -422,11 +349,10 @@ class Retriever:
         skipped = 0
 
         skipped += self._admit(fp_events,       self.max_fp_warnings,      id_to_instr, selected, events)
-        skipped += self._admit(fn_events,       self.max_fn_warnings,      id_to_instr, selected, events)
         skipped += self._admit(semantic_events, self.max_sem_instructions, id_to_instr, selected, events)
 
         if skipped:
-            self._log_cap_hit(skipped, fp_events, fn_events, semantic_events, len(selected))
+            self._log_cap_hit(skipped, fp_events, semantic_events, len(selected))
 
         return RetrievalResult(
             instructions=selected,
@@ -486,15 +412,14 @@ class Retriever:
             admitted += 1
         return skipped
 
-    def _log_cap_hit(self, skipped, fp_events, fn_events, sem_events, n_selected) -> None:
+    def _log_cap_hit(self, skipped, fp_events, sem_events, n_selected) -> None:
         def fmt(cap):
             return str(cap) if cap is not None else "∞"
 
         logger.debug(
-            "Count cap hit: %d skipped  (fp=%d/%s fn=%d/%s sem=%d/%s total=%d/%s)",
+            "Count cap hit: %d skipped  (fp=%d/%s sem=%d/%s total=%d/%s)",
             skipped,
             min(len(fp_events),  self.max_fp_warnings      or len(fp_events)),  fmt(self.max_fp_warnings),
-            min(len(fn_events),  self.max_fn_warnings      or len(fn_events)),  fmt(self.max_fn_warnings),
             min(len(sem_events), self.max_sem_instructions or len(sem_events)), fmt(self.max_sem_instructions),
             n_selected, fmt(self.max_instructions_total),
         )

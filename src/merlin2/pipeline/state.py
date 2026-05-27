@@ -17,7 +17,7 @@ from typing import Dict, List, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 from src.data.evaluate import normalize_icd
-from src.merlin2.retriever_events import RetrievalEvent
+from src.merlin2.retriever import RetrievalEvent
 from src.meta_verifier.schemas import Instruction
 from src.prompter import ICDsModel
 

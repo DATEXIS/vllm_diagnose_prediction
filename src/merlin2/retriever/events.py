@@ -18,11 +18,10 @@ from src.meta_verifier.schemas import Instruction
 class RetrievalEvent:
     """A single retrieval hit, recorded for later threshold tuning."""
     instruction_id: int
-    path: str                      # sem_* (section/ICD) | threshold_fpr | threshold_fnr
-    trigger_value: float           # cosine score, or fpr/fnr value
+    path: str                      # sem_* (section/ICD) | threshold_fpr
+    trigger_value: float           # cosine score, or fpr value
     efficacy_score: float
-    target_codes: List[str] = field(default_factory=list)   # codes this instruction targets
-    trigger_codes: List[str] = field(default_factory=list)  # FNR only: predicted codes that fired this
+    target_codes: List[str] = field(default_factory=list)
 
 
 @dataclass

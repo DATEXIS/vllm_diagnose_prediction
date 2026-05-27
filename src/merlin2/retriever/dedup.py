@@ -21,7 +21,7 @@ from typing import Dict, List
 
 import numpy as np
 
-from src.merlin2.retriever_events import RetrievalEvent
+from .events import RetrievalEvent
 from src.meta_verifier.schemas import Instruction
 
 

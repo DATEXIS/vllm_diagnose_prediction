@@ -55,7 +55,6 @@ merlin2:
   sim_note_threshold: 0.75
   sim_icd_threshold: 0.75
   fpr_threshold: 0.85               # reduced false prunes; codes 0.75-0.84 were often true positives
-  fnr_threshold: 0.6
   min_support: 2                    # minimum case count before a code is eligible for code_stats
   convergence_threshold: 0.95
   max_iterations: 5                 # increased; budget_exhausted was cutting off improving cases early
@@ -73,7 +72,6 @@ merlin2:
 
   # --- Per-type instruction count caps (primary retrieval budget control) ---
   max_fp_warnings: 5                # FP gate cap per iteration; highest fpr first
-  max_fn_warnings: 0                # FN gate cap per iteration; highest fnr first
   max_sem_instructions: 10          # semantic cap; sweet spot ~12-13 from run analysis
   max_instructions_total: null      # optional hard ceiling across all three; null = uncapped
 
@@ -95,14 +93,6 @@ merlin2:
   instructions_path: "data/instructions.parquet"
   instructions_artifact_name: "instructions_db"
   instructions_artifact_version: "v5"
-
-  # --- Co-occurrence index (FN retrieval) ---
-  # Built once per train split: python scripts/build_cooccurrence.py --config configs/experiment.yaml
-  # cooccurrence_threshold is a lift threshold: P(a,b) / (P(a)*P(b))
-  cooccurrence_path: "data/cooccurrence.parquet"
-  cooccurrence_threshold: 7.0       # was 5.0; lift=7 cuts FN hallucinations that fire at T=2+
-  cooccurrence_top_k: 3             # was 5; fewer candidates per seed given higher lift threshold
-  cooccurrence_min_joint_count: 3
 
   # --- Per-code threshold-warning stats ---
   # Loop B writes new entries; Retriever synthesises FP/FN warning text at runtime.

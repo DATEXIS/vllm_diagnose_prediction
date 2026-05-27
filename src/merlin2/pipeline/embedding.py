@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
-from src.merlin2.pipeline_state import CaseState
+from .state import CaseState
 from src.utils.embeddings import encode_texts
 
 

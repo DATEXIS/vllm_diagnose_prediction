@@ -7,7 +7,7 @@ the per-type count caps. They are split into:
   * Semantic paths (`sem_*`) — one per known admission note section, plus
     `sem_icd` for the ICD-reasoning path and `sem_note` as the fallback
     when no section breakdown is available.
-  * Threshold paths — `threshold_fpr` / `threshold_fnr`.
+  * Threshold path — `threshold_fpr` for the false-positive warning gate.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from typing import Dict
 
 
 THRESHOLD_FPR = "threshold_fpr"
-THRESHOLD_FNR = "threshold_fnr"
 
 # Per-section semantic paths — one constant per known admission note section.
 SEM_COMPLAINT  = "sem_complaint"    # CHIEF COMPLAINT
