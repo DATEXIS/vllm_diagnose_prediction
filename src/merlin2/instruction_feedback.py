@@ -1,9 +1,9 @@
 """Render retrieved instructions into the Generator's <coding_review> block.
 
 Loop A pre-fills a structured per-iteration block in the user prompt with
-the instructions the Retriever surfaced. Threshold warnings (FP/FN) are
-collapsed into one prose line each so they read like genuine self-reflection;
-semantic / contrastive-swap instructions appear as individual bullets.
+the instructions the Retriever surfaced. FP warnings are collapsed into one
+prose line so they read like genuine self-reflection; semantic /
+contrastive-swap instructions appear as individual bullets.
 
 Kept in its own module so the Generator only concerns itself with the
 network call and response parsing.
@@ -20,10 +20,7 @@ from src.utils.prompt_loader import load_prompt
 InstructionHistory = List[Tuple[List[str], List[Instruction]]]
 
 
-def build_think_block(
-    instruction_history: InstructionHistory,
-    max_history_depth: int = 2,
-) -> str:
+def build_think_block(instruction_history: InstructionHistory) -> str:
     """Build the <coding_review> block prefixed to the user turn.
 
     Returns "" when no instructions have ever fired (zero-shot, or every
@@ -33,15 +30,6 @@ def build_think_block(
     Special case: if the most recent prediction was completely empty (0 codes),
     a zero-prediction escalation block is always emitted even when the retriever
     returned nothing — the model needs a hard redirect, not silence.
-
-    `max_history_depth` caps how many of the most recent iteration blocks are
-    rendered inside the <coding_review>. Older blocks are dropped — their
-    instructions are already reflected in the current prediction. This keeps
-    the block from growing unboundedly across many iterations and prevents
-    context-length parse failures at late iterations (T=4+).
-    Default is 2: the model always sees the baseline prediction and the most
-    recent round of instructions, plus one prior round for context.
-    Set to None to disable the cap (original behaviour, not recommended).
     """
     last_codes = instruction_history[-1][0] if instruction_history else []
     zero_prediction = len(last_codes) == 0 and len(instruction_history) > 0
@@ -49,19 +37,9 @@ def build_think_block(
     if not _has_any_instruction(instruction_history) and not zero_prediction:
         return ""
 
-    # Apply depth cap: keep the tail of the history, but always include t=0
-    # so the model can see where it started even when history is trimmed.
-    if max_history_depth is not None and len(instruction_history) > max_history_depth:
-        kept = instruction_history[-max_history_depth:]
-        # Adjust iteration numbers so the header text stays accurate
-        offset = len(instruction_history) - max_history_depth
-    else:
-        kept = instruction_history
-        offset = 0
-
     blocks = [
-        _render_iteration_block(offset + t, codes, instructions)
-        for t, (codes, instructions) in enumerate(kept)
+        _render_iteration_block(t, codes, instructions)
+        for t, (codes, instructions) in enumerate(instruction_history)
     ]
     content = "\n".join(blocks).rstrip()
     return load_prompt("think_block").format(content=content)
@@ -113,18 +91,14 @@ def _render_instruction_lines(
     warning rendered by the caller takes priority.
     """
     fp = [] if suppress_fp else [i for i in instructions if i.type == InstructionType.FP_WARNING]
-    fn = [i for i in instructions if i.type == InstructionType.FN_WARNING]
-    semantic = [
-        i for i in instructions
-        if i.type not in (InstructionType.FP_WARNING, InstructionType.FN_WARNING)
-    ]
+    semantic = [i for i in instructions if i.type != InstructionType.FP_WARNING]
 
     parts: List[str] = []
     if fp:
         parts.append(_render_fp_line(fp))
-    if fn:
-        parts.append(_render_fn_line(fn))
-    parts.append("GENERAL INSTRUCTIONS:")
+    parts.append(
+        "CANDIDATE CODES (additive only — do NOT remove any existing code based on these):"
+    )
     parts.extend(_render_semantic_line(i, n) for n, i in enumerate(semantic, 1))
     return "\n".join(parts).rstrip()
 
@@ -153,20 +127,10 @@ def _render_low_count_warning(n_codes: int) -> str:
 def _render_fp_line(fp_warnings: List[Instruction]) -> str:
     code_stmts = "\n  ".join(f"* {i.instruction_text}" for i in fp_warnings)
     return (
-        f"FALSE POSITIVE CODES:\nThe following predicted codes have been verified as false positives "
-        f"in the vast majority of similar cases. "
-        f"I most likely should remove each of them. "
-        f"I should really only keep it if I can find very strong evidence:\n{code_stmts}"
-    )
-
-
-def _render_fn_line(fn_warnings: List[Instruction]) -> str:
-    code_stmts = "; ".join(i.instruction_text for i in fn_warnings)
-    return (
-        f"FALSE NEGATIVE CODES:\nSome codes are frequently missed in cases like this: "
-        f"{code_stmts}. "
-        f"I should carefully check whether the note supports any of these — "
-        f"even an indirect clinical cue is sufficient to add the code."
+        f"FALSE POSITIVE CODES:\nOnly the codes listed below are under question — "
+        f"all other codes in my prediction carry forward unchanged. "
+        f"For each code listed, I must find explicit documentation in the note to keep it; "
+        f"a plausible inference is not enough. Remove it only if no direct evidence exists.\n{code_stmts}"
     )
 
 

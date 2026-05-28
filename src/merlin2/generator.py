@@ -81,8 +81,6 @@ class Generator:
         inf_cfg = self.config.get("inference", {})
         self.instruction_reasoning: bool = inf_cfg.get("instruction_reasoning", True)
         self.thinking: bool = inf_cfg.get("thinking", False)
-        merlin_cfg = self.config.get("merlin2", {})
-        self.max_history_depth: Optional[int] = merlin_cfg.get("max_history_depth", 2)
 
     # ----------------------------------------------------------------- API
     async def generate_batch(self, requests: List[GenerateRequest]) -> List[GenerateResult]:
@@ -129,34 +127,32 @@ class Generator:
     def _build_prompt(
         self, req: GenerateRequest
     ) -> Tuple[List[Dict[str, str]], str]:
-        """Return (messages, think_block_str).
+        """Return (messages, coding_review_str).
 
         messages is a role-separated list ready for the chat/completions API:
-          - system: task framing
-          - user  : admission note, with the <coding_review> block appended
-                    inline when instructions are available (t >= 1)
+          - system: task framing, with the <coding_review> block injected via
+                    the {think_block} placeholder when instructions exist (t >= 1)
+          - user  : admission note only
 
-        The <coding_review> block sits in the user turn rather than as an
-        assistant prefill. A closed assistant prefill causes models to emit EOS
-        or enter repetition loops because the turn looks complete; guided
-        decoding then fights with the </coding_review> closure. Keeping it in
-        the user turn lets the model generate a clean JSON response with full
-        context visible.
+        The <coding_review> block lives in the system prompt rather than the
+        user turn. This keeps the user turn a clean note-only context: when
+        the model is in refinement mode it should process instructions, not
+        re-analyse note text.
         """
+        coding_review = build_think_block(req.instruction_history)
         system = load_prompt("generator_system").format(
             json_example=build_json_example(self.instruction_reasoning),
             general_guidelines=GENERAL_GUIDELINES,
             instruction_reasoning_field_doc=(
                 INSTRUCTION_REASONING_FIELD_DOC if self.instruction_reasoning else ""
             ),
+            think_block=coding_review,
         )
         user = load_prompt("generator_user").format(admission_note=req.admission_note)
-        coding_review = build_think_block(req.instruction_history, self.max_history_depth)
-        user_content = f"{user}\n{coding_review}" if coding_review else user
 
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": system},
-            {"role": "user",   "content": user_content},
+            {"role": "user",   "content": user},
         ]
         return messages, coding_review
 

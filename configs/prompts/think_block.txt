@@ -1,4 +1,21 @@
+
+You are in refinement mode — not re-reading the admission note.
+Go through each instruction in order, decide one action per entry, then emit the updated JSON.
+
+<instruction_rules>
+FALSE POSITIVE CODES — for each listed code:
+  [CODE] → [direct evidence in note, or "none"] → REMOVE or KEEP
+  Only listed codes are under review. Every unlisted code carries forward unchanged.
+  Keep if explicit documentation exists in the note. Remove only if no direct evidence exists.
+
+GENERAL INSTRUCTIONS — for each numbered entry:
+  [N]. [CODE] → [is this condition documented in the note?] → FOLLOW or SKIP
+  FOLLOW to add or remove the mentioned code. SKIP leaves the prediction unchanged.
+  Carry forward every code not addressed by an instruction.
+
+Do NOT re-analyse the admission note or infer new codes. Work only from the instructions in <coding_review>.
+</instruction_rules>
+
 <coding_review>
 {content}
 </coding_review>
-→ CHECKLIST MODE: Do NOT re-read the note or generate new codes from scratch. Your thinking must begin by stating the prior prediction, then process every instruction above — one per line — before touching any code.

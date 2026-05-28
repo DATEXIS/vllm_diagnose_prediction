@@ -26,7 +26,7 @@ from src.merlin2.generator import Generator, GenerateRequest, GenerateResult
 from .builders import build_generator, build_retriever, build_verifier
 from .efficacy import update_efficacy_scores
 from .embedding import BatchedEmbeddings, embed_cases
-from .logging import log_wave_inputs
+from .wave_log import log_wave_inputs
 from .state import (
     CaseState, PipelineCaseResult, finalize_case, three_digit_codes,
 )

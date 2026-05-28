@@ -1,59 +1,11 @@
-## General ICD-10 Coding Guidelines
-
-These rules apply to every case regardless of retrieved instructions.
-
-**Symptoms vs. underlying conditions**
-Do not code a symptom when the underlying condition is already coded. Symptoms
-integral to a disease are not coded separately. Exception: code a symptom only
-when it is the reason for the encounter and the underlying cause is not yet
-established.
-
-**Comorbidities**
-Code all chronic conditions that co-exist at the time of admission and affect
-patient management, even if not the primary reason for the visit. This includes
-hypertension, diabetes, COPD, CKD, heart failure, and obesity when documented
-in the PMH or active problem list.
-
-**History vs. active disease**
-A condition is "historical" only if resolved or in complete remission — use
-personal history Z-codes (Z85–Z87) in that case. If it is ongoing or affects
-current management, code it as active.
-
-**Personal and family history Z-codes (Z80–Z87)**
-Assign personal history codes (Z85–Z87) only when the prior condition directly
-influences current management (e.g., prior cancer affecting treatment decisions).
-Assign family history codes (Z80–Z84) only when the family history actively
-drives clinical decision-making for this admission — not for incidental
-background mentions in a family history section. When multiple family or
-personal history conditions are documented, code only those with direct
-management relevance to the current encounter.
-
-**Long-term medication use (Z79)**
-Scan every drug listed under "Medications on Admission". Each scheduled
-(non-PRN) chronic medication warrants the appropriate Z79 sub-code:
-anticoagulants → Z79.01, antibiotics → Z79.2, steroids → Z79.52,
-insulin → Z79.4, oral hypoglycemics → Z79.84, immunosuppressants → Z79.899.
-This is a systematic source of missed codes.
-
-**Code specificity**
-Always assign the most specific code supported by the documentation. Avoid
-"unspecified" variants (.9 / NOS) when the note provides enough detail for a
-more specific subcode. Do not fabricate specificity not in the note.
-
-**Combination codes**
-When ICD-10 provides a single combination code for two conditions (e.g.,
-diabetes with nephropathy, COPD with acute exacerbation), use it rather than
-coding the conditions separately.
-
-**Acute vs. chronic distinction**
-Distinguish an acute episode from the underlying chronic disease and code both
-when documented (e.g., acute-on-chronic heart failure: code both the acute
-decompensation and the chronic HF).
-
-**"Possible", "probable", "suspected" diagnoses**
-For inpatient encounters, code these as confirmed unless contradicted elsewhere
-in the note. Do not code them as symptoms alone.
-
-**Procedures and devices**
-Implanted devices and long-term therapies have their own status codes. Do not
-substitute a procedure code for the diagnosis that led to it.
+<coding_rules>
+* **Symptoms:** Code only if the underlying cause is unestablished and it drove the admission. Skip symptoms integral to a diagnosed disease.
+* **Comorbidities:** Code all active chronic conditions (e.g., HTN, diabetes, COPD) that affect current patient management.
+* **History vs. Active (Z80–Z87):** Code as active if it impacts current care. Use history Z-codes ONLY if a resolved personal or family history directly alters current treatment decisions. Ignore incidental background history.
+* **Long-Term Meds (Z79):** Systematically code all scheduled (non-PRN) admission medications (e.g., Z79.4 insulin, Z79.01 anticoagulants, Z79.2 antibiotics). 
+* **Specificity:** Assign the most granular code supported by the text. Avoid unspecified (.9/NOS) codes, but do not hallucinate or fabricate specificity.
+* **Combinations:** Prioritize single combination codes (e.g., diabetes with nephropathy) over coding conditions separately.
+* **Acute-on-Chronic:** Code both the acute exacerbation and the underlying chronic condition.
+* **Uncertainty:** Code inpatient "possible," "probable," or "suspected" diagnoses as confirmed.
+* **Devices:** Assign status codes for implanted devices and therapies. Do not substitute procedure codes for diagnoses.
+</coding_rules>

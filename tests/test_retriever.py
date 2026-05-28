@@ -68,8 +68,8 @@ class TestFPThresholdPath:
         assert result.instructions[0].target_codes == ["I10"]
         assert result.events[0].path == THRESHOLD_FPR
         assert result.events[0].trigger_value == pytest.approx(0.78)
-        # Synthesised instruction text actually contains the rate
-        assert "0.78" in result.instructions[0].instruction_text
+        # Synthesised instruction text actually contains the rate (formatted as %)
+        assert "78%" in result.instructions[0].instruction_text
         # Synthesised IDs come from the deterministic-hash range
         assert result.instructions[0].instruction_id == synthetic_instruction_id("fp", "I10")
 
