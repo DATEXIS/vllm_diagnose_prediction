@@ -149,27 +149,6 @@ class TestHalts:
         assert results[0].halt_reason == HaltReason.NO_NEW_INSTRUCTIONS
 
 
-class TestEfficacyUpdate:
-    @pytest.mark.asyncio
-    async def test_efficacy_increases_with_positive_delta_f1(self, base_config):
-        # Ground truth = ["I10"]. t=0 predicts wrong -> f1=0. t=1 predicts right -> f1=1.
-        # Instruction retrieved fresh at t=1 should get +1.0 * learning_rate * rareness.
-        gen = _ScriptedGenerator([[["X"]], [["I10"]]])
-        instr = _semantic_instr(1)
-        retriever = Retriever(sim_note_threshold=0.0, sim_icd_threshold=0.0)
-        retriever.load_instructions([instr])
-        verifier = Verifier(max_iterations=3, max_tokens_budget=100_000, convergence_threshold=0.99)
-
-        cfg = dict(base_config)
-        cfg["merlin2"] = dict(base_config["merlin2"], learning_rate=2.0)
-        pipeline = MERLINPipeline(cfg, generator=gen, retriever=retriever, verifier=verifier)
-
-        with patch("src.merlin2.retriever.encode_single_text", return_value=[1.0, 0.0]):
-            await pipeline.run(
-                admission_notes=["note"],
-                hadm_ids=["1"],
-                ground_truth_codes=[["I10"]],
-                rareness_factors=[3.0],
-            )
-        # delta F1 = 1.0 - 0.0 = 1.0; lr=2.0; rareness=3.0 => +6.0
-        assert instr.efficacy_score == pytest.approx(6.0)
+# TestEfficacyUpdate removed: online delta-F1 efficacy updates were replaced
+# by the post-hoc instruction_eval pass in loop_a.save_efficacy_scores().
+# See src/merlin2/instruction_eval.py for the new per-instruction metrics.

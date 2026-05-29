@@ -44,11 +44,12 @@ async def main_async(config: dict) -> None:
 
     results = await run_loop_a(pipeline, df)
 
-    if _should_save_efficacy(df, config):
-        save_efficacy_scores(pipeline, config)
-
     df = build_prediction_df(df, results, config)
-    df_results = evaluate_and_log(df, results, config)
+    eval_result = evaluate_and_log(df, results, config, instructions=pipeline.retriever._instructions)
+    df_results, eval_tables = eval_result if eval_result else (None, {})
+
+    if _should_save_efficacy(df, config):
+        save_efficacy_scores(pipeline, config, eval_tables=eval_tables)
 
     await _maybe_run_loop_b(df, df_results, existing, config)
 

@@ -62,18 +62,40 @@
 * **Role:** Synchronous traffic controller.
 * **Task:** Halts the Generator's inference loop if any condition is met: Token budget exhausted, no new instructions retrieved from the database, predictions stabilize (convergence), or maximum iteration steps reached.
 
-### Efficacy Score Update Rule
+### Instruction Evaluation & Efficacy Score Update
 
-* **Granularity:** scores update **per iteration**, after the Generator produces prediction `P_t`.
-* **Rewarded set:** only the persistent (semantic / contrastive) instructions retrieved **fresh at iteration `t`** receive a score update. Instructions carried over from earlier iterations stay in the prompt but no longer accumulate reward — they had their chance. Synthesised threshold warnings (`fp_warning` / `fn_warning`) are never rewarded: their `efficacy_score` is permanently `0.0`. They fire whenever the gate triggers, full stop. This is a deliberate simplification over per-warning efficacy tracking.
-* **Reward signal:** `delta_F1 = F1(P_t) − F1(P_{t−1})`, computed against ground truth at the case level.
-* **Frequency-aware F1:** rare codes contribute more to the reward than common codes. Implemented simply: each sample in the patient file carries a precomputed `rareness_factor` (derived from training-set ICD-code frequencies in a separate preprocessing step). The reward signal is multiplied by this factor — no in-loop frequency lookup table needed.
-* **Update:** for each freshly retrieved instruction `i` at iteration `t`:
-  ```
-  efficacy_score[i] += learning_rate * delta_F1 * rareness_factor
-  ```
-* **Training only:** efficacy updates run only when ground truth is available (training split). At test time, scores are read but never written.
-* **t=0 implication:** the zero-shot prediction `P_0` is the baseline that the first reward signal is computed against. No instructions are rewarded at t=0 (none were used).
+Efficacy scores are updated **post-hoc** at the end of Loop A (not online during the wave loop) via `src/merlin2/instruction_eval.py`. Three quality dimensions are computed per instruction:
+
+**1. Retrieval Precision** (correct trigger rate)
+Does the instruction fire for the right cases?
+- TP: retrieved + action aligns with ground truth (`add` → code ∈ GT; `remove` → code ∉ GT)
+- FP: retrieved + action contradicts ground truth
+- `precision = n_tp / (n_tp + n_fp)`
+
+**2. Retrieval Recall** (description quality)
+When a case is relevant, does the instruction get retrieved?
+- FN: case is relevant but instruction was never retrieved
+- Relevance: `add` → any target code ∈ GT; `remove` → any target code was predicted AND ∉ GT
+- `recall = n_tp / (n_tp + n_fn)` — low recall means the description/embedding misses the notes it should match
+
+**3. Adoption** (instruction text quality)
+When retrieved, does the model follow the instruction?
+- `adoption_rate`: prediction at iteration `t` already aligns with the recommendation
+- `tp_adoption_rate`: adoption among TP-retrievals only (ignores instructions that fired incorrectly)
+- `change_rate`: prediction concretely moved in the right direction from `t−1` → `t` (causal signal)
+
+**Score assignment** (in `loop_a.save_efficacy_scores`):
+```
+efficacy_score[i] = F1(i)  # or precision if recall cannot be computed
+```
+Instructions not retrieved in the current run keep their existing score. The updated `efficacy_score` is persisted to parquet and used by the Retriever for ranking on subsequent runs.
+
+Synthesised threshold warnings (`fp_warning`) are never written to the instruction store; their `efficacy_score` stays at `0.0`.
+
+All four views are logged to wandb under the `instruction_eval/*` namespace:
+- `instruction_eval/per_instruction` — full per-instruction table with all metrics
+- `instruction_eval/by_type`, `/by_action`, `/by_section` — breakdowns
+- Summary scalars: `instruction_eval/mean_precision`, `mean_recall`, `mean_f1`, `mean_adoption_rate`
 
 ---
 
@@ -215,6 +237,7 @@ No formal test suite. Validate changes by running a small sample:
 | **Verifier (V)** | `src/merlin2/verifier.py` |
 | **Pipeline (Loop A orchestration)** | `src/merlin2/pipeline.py` |
 | **Entry point (Loop A + Loop B driver)** | `src/main.py` |
+| **Instruction evaluation (precision / recall / adoption)** | `src/merlin2/instruction_eval.py` |
 | **Meta-Verifier (M)** | `src/meta_verifier/meta_verifier.py` |
 | **Persistent instruction store** | `src/meta_verifier/store.py` (rows in `data/instructions.parquet`) |
 | **Per-code threshold stats** | `src/meta_verifier/code_stats.py` (rows in `data/code_stats.parquet`) |
@@ -241,7 +264,6 @@ Tuned empirically from here; locked in as the first run's config.
 | `convergence_threshold` | 0.9 | Verifier — Jaccard similarity between consecutive predictions to halt |
 | `max_iterations` | 5 | Verifier — hard cap on iterations per case |
 | `max_tokens_budget` | 2500 | Retriever — token cap for the `<think>` block |
-| `learning_rate` | 1.2 | Efficacy update — multiplier on `delta_F1_weighted` |
 | `instructions_artifact_name` | `instructions_db` | Wandb artifact lineage for `instructions.parquet` |
 | `instructions_artifact_version` | `latest` | Pin to a specific version (e.g. `v3`) for reproducibility ablations |
 | `code_stats_artifact_name` | `code_stats` | Wandb artifact lineage for `code_stats.parquet` |

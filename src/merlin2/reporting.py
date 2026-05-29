@@ -190,12 +190,30 @@ def _format_instruction_lines(result: PipelineCaseResult) -> List[str]:
     if not any(events for events, _ in retrieval_pairs):
         return []
 
+    # Pre-compute code sets for annotation; empty when ground truth is absent.
+    gt_set: set = {normalize_icd(c) for c in (result.history.ground_truth_codes or [])}
+    predictions = result.history.predictions
+
     lines = ["\n--- Retrieved Instructions ---"]
     for t, (events, instrs) in enumerate(retrieval_pairs):
         if not events:
             continue
         ev_by_id = {ev.instruction_id: ev for ev in events}
-        fpr_lines, sem_lines = _classify_instruction_lines(instrs, ev_by_id)
+
+        # Instructions retrieved at wave t are shown to the model, which then
+        # produces predictions[t].  predictions[t-1] is what it said before.
+        pred_t_codes: set = (
+            set(_norm_codes_from_pred(predictions[t])) if t < len(predictions) else set()
+        )
+        pred_prev_codes: set = (
+            set(_norm_codes_from_pred(predictions[t - 1]))
+            if t > 0 and (t - 1) < len(predictions)
+            else set()
+        )
+
+        fpr_lines, sem_lines = _classify_instruction_lines(
+            instrs, ev_by_id, gt_set, pred_t_codes, pred_prev_codes
+        )
 
         lines.append(f"\nT={t}:")
         if fpr_lines:
@@ -207,7 +225,13 @@ def _format_instruction_lines(result: PipelineCaseResult) -> List[str]:
     return lines
 
 
-def _classify_instruction_lines(instrs, ev_by_id) -> tuple:
+def _classify_instruction_lines(
+    instrs,
+    ev_by_id,
+    gt_set: set,
+    pred_t_codes: set,
+    pred_prev_codes: set,
+) -> tuple:
     fpr_lines, sem_lines = [], []
     for instr in instrs:
         ev = ev_by_id.get(instr.instruction_id)
@@ -215,13 +239,72 @@ def _classify_instruction_lines(instrs, ev_by_id) -> tuple:
             continue
         codes_tag = ", ".join(ev.target_codes) if ev.target_codes else "?"
         snippet = (instr.instruction_text or "")[:90].replace("\n", " ")
+        annotation = _eval_annotation(instr, gt_set, pred_t_codes, pred_prev_codes)
 
         if ev.path == THRESHOLD_FPR:
-            fpr_lines.append(f"  * {codes_tag:<6}  fpr={ev.trigger_value:.2f}")
+            fpr_lines.append(f"  * {codes_tag:<6}  fpr={ev.trigger_value:.2f}{annotation}")
         elif is_semantic_path(ev.path):
             section_tag = ev.path.removeprefix("sem_")
             sem_lines.append(
                 f"  * [{codes_tag}]  [{section_tag}]"
-                f"  sim={ev.trigger_value:.2f}  \"{snippet}\""
+                f"  sim={ev.trigger_value:.2f}  \"{snippet}\"{annotation}"
             )
     return fpr_lines, sem_lines
+
+
+def _eval_annotation(instr, gt_set: set, pred_t_codes: set, pred_prev_codes: set) -> str:
+    """Return a short '  ✓  +added' / '  ✗  ignored' tag for one retrieved instruction.
+
+    Empty string when gt_set is absent (test/eval run without ground truth)
+    or target_codes is empty.
+
+    Correctness (✓ / ✗):
+        add    — TP if any target code is in GT
+        remove — TP if any target code is *not* in GT (i.e. the model was
+                 right to be warned against adding it)
+
+    Adoption status (what the model did at this wave):
+        +added      — add instruction, code was absent at t-1 and present at t
+        already-in  — add instruction, code already present at t-1 and still at t
+        ignored     — add instruction, code absent at t
+        -removed    — remove instruction, code present at t-1 and absent at t
+        already-out — remove instruction, code absent at both t-1 and t
+        ignored     — remove instruction, code still present at t
+    """
+    if not gt_set:
+        return ""
+    norm_targets = {normalize_icd(c) for c in (instr.target_codes or []) if normalize_icd(c)}
+    if not norm_targets:
+        return ""
+
+    action = (instr.action or "").lower()
+
+    # Correctness
+    if action == "add":
+        correct = bool(norm_targets & gt_set)
+    else:  # remove / default
+        correct = bool(norm_targets - gt_set)
+
+    tick = "✓" if correct else "✗"
+
+    # Adoption
+    if action == "add":
+        in_t = norm_targets & pred_t_codes
+        in_prev = norm_targets & pred_prev_codes
+        if in_t and not (in_t & in_prev):
+            status = "+added"
+        elif in_t:
+            status = "already-in"
+        else:
+            status = "ignored"
+    else:  # remove
+        was_predicted = norm_targets & pred_prev_codes
+        still_predicted = norm_targets & pred_t_codes
+        if was_predicted and not still_predicted:
+            status = "-removed"
+        elif not was_predicted:
+            status = "already-out"
+        else:
+            status = "ignored"
+
+    return f"  {tick}  {status}"

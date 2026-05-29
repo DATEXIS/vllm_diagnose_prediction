@@ -100,7 +100,6 @@ def log_parameters(config: Dict[str, Any]) -> None:
             "merlin2.max_iterations": merlin2.get("max_iterations"),
             "merlin2.max_tokens_budget": merlin2.get("max_tokens_budget"),
             "merlin2.per_iteration_token_budget": merlin2.get("per_iteration_token_budget"),
-            "merlin2.learning_rate": merlin2.get("learning_rate"),
             "merlin2.min_support": merlin2.get("min_support"),
         },
         allow_val_change=True,
@@ -169,9 +168,6 @@ def log_sample_table(df: pd.DataFrame, config: dict, n_samples: int = 30) -> Non
         log_df = log_df.drop(columns=['predictions'], errors="ignore")
 
     log_df = log_df.copy()
-
-    if "rareness_factor" in log_df.columns:
-        log_df["rareness_factor"] = log_df["rareness_factor"].round(3)
 
     if "full_diagnoses" in log_df.columns:
         log_df["full_diagnoses"] = log_df["full_diagnoses"].apply(
@@ -357,6 +353,60 @@ def log_instruction_efficiency_tables(instructions: List[Instruction]) -> None:
     logger.info(
         "Logged top-30 / bottom-30 instruction efficiency tables "
         "(%d total instructions).", len(instructions)
+    )
+
+
+def log_instruction_confusion_matrix(tables: dict) -> None:
+    """Log instruction retrieval quality tables to wandb.
+
+    Expects the dict returned by ``instruction_eval.compute_all()``:
+        'per_instruction', 'by_type', 'by_action', 'by_section',
+        'correctness' (skipped — too large for a wandb Table),
+        'fn_events'   (skipped — too large for a wandb Table).
+
+    Tables logged under the ``instruction_eval/`` namespace.
+
+    Summary scalars (mean over instructions with n_retrieved ≥ 1) are pushed
+    to wandb.summary so they appear in the run comparison view:
+        instruction_eval/mean_precision
+        instruction_eval/mean_recall
+        instruction_eval/mean_f1
+        instruction_eval/mean_adoption_rate
+        instruction_eval/mean_change_rate
+        instruction_eval/n_instructions_evaluated
+    """
+    table_keys = {
+        "per_instruction": "instruction_eval/per_instruction",
+        "by_type":         "instruction_eval/by_type",
+        "by_action":       "instruction_eval/by_action",
+        "by_section":      "instruction_eval/by_section",
+    }
+    log_dict: Dict[str, Any] = {}
+    for key, wandb_key in table_keys.items():
+        df = tables.get(key)
+        if df is not None and not df.empty:
+            log_dict[wandb_key] = wandb.Table(dataframe=df.round(4))
+    if log_dict:
+        wandb.log(log_dict)
+
+    # Summary scalars from per_instruction
+    per_instr = tables.get("per_instruction")
+    if per_instr is not None and not per_instr.empty:
+        active = per_instr[per_instr["n_retrieved"] >= 1]
+        summary: Dict[str, Any] = {
+            "instruction_eval/n_instructions_evaluated": int(len(active)),
+        }
+        for col in ("precision", "recall", "f1", "adoption_rate", "change_rate"):
+            if col in active.columns:
+                valid = active[col].dropna()
+                if not valid.empty:
+                    summary[f"instruction_eval/mean_{col}"] = float(valid.mean())
+        wandb.summary.update(summary)
+
+    logger.info(
+        "Logged instruction confusion matrix (%d tables, %d instructions).",
+        len(log_dict),
+        len(per_instr) if per_instr is not None else 0,
     )
 
 

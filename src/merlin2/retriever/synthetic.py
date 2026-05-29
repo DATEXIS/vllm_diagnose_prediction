@@ -68,6 +68,7 @@ class SyntheticInstructionFactory:
         instr = Instruction(
             instruction_id=instr_id,
             type=InstructionType.FP_WARNING,
+            action="remove",
             instruction_text=build_threshold_text(code, stat),
             description="",
             target_codes=[code],

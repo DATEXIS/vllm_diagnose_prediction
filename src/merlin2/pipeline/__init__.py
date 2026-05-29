@@ -1,9 +1,11 @@
 """MERLIN 2 Loop A orchestrator.
 
 Lockstep waves: all live samples complete iteration t before any starts
-t+1. After each wave: (a) record retrieval events, (b) update efficacy
-scores from delta-F1 * rareness_factor (training only), (c) ask the
-Verifier which cases halt.
+t+1. After each wave: (a) record retrieval events, (b) ask the Verifier
+which cases halt.
+
+Efficacy scores are updated post-hoc at the end of Loop A via
+instruction_eval.compute_all(), not online during the wave loop.
 
 The first wave is zero-shot (no instructions, no <think> block). From t=1
 onward retrieval is active. Phase-level orchestration lives in main.py.
@@ -13,7 +15,6 @@ This file is intentionally thin. Heavy lifting lives in sibling modules:
   * state      — CaseState / PipelineCaseResult + small helpers
   * builders   — Generator / Retriever / Verifier construction
   * embedding  — batched note + reason embedding
-  * efficacy   — efficacy-score updates
   * logging    — DEBUG per-wave structured log
 """
 
@@ -24,7 +25,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.merlin2.generator import Generator, GenerateRequest, GenerateResult
 from .builders import build_generator, build_retriever, build_verifier
-from .efficacy import update_efficacy_scores
 from .embedding import BatchedEmbeddings, embed_cases
 from .wave_log import log_wave_inputs
 from .state import (
@@ -51,9 +51,6 @@ class MERLINPipeline:
         verifier: Optional[Verifier] = None,
     ) -> None:
         self.config = config
-        m2_cfg = config.get("merlin2", {})
-        self.learning_rate: float = m2_cfg.get("learning_rate", 1.2)
-        self._update_efficacy_enabled: bool = m2_cfg.get("update_efficacy", True)
 
         self.generator = generator if generator is not None else build_generator(config)
         self.retriever = retriever if retriever is not None else build_retriever(config)
@@ -66,9 +63,8 @@ class MERLINPipeline:
         admission_notes: List[str],
         hadm_ids: Optional[List[str]] = None,
         ground_truth_codes: Optional[List[List[str]]] = None,
-        rareness_factors: Optional[List[float]] = None,
     ) -> List[PipelineCaseResult]:
-        states = self._init_states(admission_notes, hadm_ids, ground_truth_codes, rareness_factors)
+        states = self._init_states(admission_notes, hadm_ids, ground_truth_codes)
         self._parse_note_sections(states)
 
         logger.info(f"[PIPELINE] Wave 0 (zero-shot): {len(states)} cases")
@@ -94,12 +90,10 @@ class MERLINPipeline:
         admission_notes,
         hadm_ids,
         ground_truth_codes,
-        rareness_factors,
     ) -> List[CaseState]:
         n = len(admission_notes)
         hadm_ids = hadm_ids or [str(i) for i in range(n)]
-        rareness_factors = rareness_factors or [1.0] * n
-        _validate_run_lengths(n, hadm_ids, rareness_factors, ground_truth_codes)
+        _validate_run_lengths(n, hadm_ids, ground_truth_codes)
         return [
             CaseState(
                 hadm_id=hadm_ids[i],
@@ -108,7 +102,6 @@ class MERLINPipeline:
                     [normalize_icd(c) for c in ground_truth_codes[i]]
                     if ground_truth_codes is not None else None
                 ),
-                rareness_factor=float(rareness_factors[i]),
             )
             for i in range(n)
         ]
@@ -262,9 +255,6 @@ class MERLINPipeline:
             )
             return
 
-        if s.ground_truth_codes is not None and self._update_efficacy_enabled:
-            update_efficacy_scores(s, retrieval, gen_res, iteration, self.learning_rate)
-
     # ---------------------------------------------------------------- pre-fetch
 
     def _prefetch_retrieval(self, states: List[CaseState]) -> List[RetrievalResult]:
@@ -299,10 +289,9 @@ class MERLINPipeline:
 def _validate_run_lengths(
     n: int,
     hadm_ids: List[str],
-    rareness_factors: List[float],
     ground_truth_codes: Optional[List[List[str]]],
 ) -> None:
     if ground_truth_codes is not None and len(ground_truth_codes) != n:
         raise ValueError("ground_truth_codes length mismatch")
-    if len(hadm_ids) != n or len(rareness_factors) != n:
-        raise ValueError("hadm_ids / rareness_factors length mismatch")
+    if len(hadm_ids) != n:
+        raise ValueError("hadm_ids length mismatch")

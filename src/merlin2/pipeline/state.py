@@ -29,7 +29,6 @@ class CaseState:
     hadm_id: str
     admission_note: str
     ground_truth_codes: Optional[List[str]]   # None at test time
-    rareness_factor: float                    # default 1.0; tunes efficacy reward
     # Pre-parsed, pre-filtered admission note sections (set once at run() init).
     note_sections: Dict[str, str] = field(default_factory=dict)
 
@@ -44,7 +43,6 @@ class CaseState:
     # Instruction objects captured at retrieval time — stored so carry-over
     # reproduces the exact text seen by the model, not the shared mutable cache.
     instructions_used: List[List[Instruction]] = field(default_factory=list)
-    iteration_f1: List[float] = field(default_factory=list)
 
     halted: bool = False
     halt_reason: str = ""

@@ -134,7 +134,7 @@ spec:
             name: diagnose-config-{{ cfg.job_name }}
       nodeSelector:
         gpu: {{ cfg.k8s.client.gpu_type }}
-        kubernetes.io/hostname: cl-worker27
+        # kubernetes.io/hostname: cl-worker27
       imagePullSecrets:
         - name: {{ cfg.k8s.image_pull_secrets }}
       restartPolicy: Never

@@ -20,12 +20,14 @@ import pandas as pd
 
 from src.data.data_loader import load_patients
 from src.data.evaluate import evaluate_predictions, normalize_icd, safe_parse_true_labels
+from src.merlin2.instruction_eval import compute_all as compute_instruction_eval
 from src.merlin2.pipeline import MERLINPipeline, PipelineCaseResult
 from src.merlin2.reporting import (
     compute_per_iteration_metrics,
     flatten_retrieval_events,
     format_retrieval_log,
 )
+from src.meta_verifier.schemas import Instruction
 from src.meta_verifier.store import load_instructions, save_instructions
 from src.utils import wandb_logger
 
@@ -46,8 +48,6 @@ def _ensure_columns(df: pd.DataFrame, target_col: str) -> pd.DataFrame:
     df = df.copy()
     if "hadm_id" not in df.columns:
         df["hadm_id"] = df.index.astype(str)
-    if "rareness_factor" not in df.columns:
-        df["rareness_factor"] = 1.0
     if target_col in df.columns:
         df["true_codes"] = df[target_col].apply(
             lambda v: [normalize_icd(c) for c in safe_parse_true_labels(v) if normalize_icd(c)]
@@ -91,34 +91,41 @@ async def run_loop_a(
         admission_notes=df["admission_note"].tolist(),
         hadm_ids=df["hadm_id"].astype(str).tolist(),
         ground_truth_codes=ground_truth,
-        rareness_factors=df["rareness_factor"].tolist(),
     )
 
 
-def save_efficacy_scores(pipeline: MERLINPipeline, config: dict) -> None:
-    """Write updated efficacy scores from Loop A back to the instruction store.
+def save_efficacy_scores(
+    pipeline: MERLINPipeline,
+    config: dict,
+    eval_tables: Optional[dict] = None,
+) -> None:
+    """Update efficacy scores from instruction_eval, persist to parquet, push to wandb.
 
-    The pipeline mutates Instruction.efficacy_score in memory but never
-    persists the change. This must be called before Loop B so that
-    append_instructions() reads the updated state, not the stale on-disk one.
+    Efficacy is now set post-hoc from the per-instruction confusion matrix
+    produced by instruction_eval.compute_all() rather than online delta-F1.
+
+    Score assignment (from per_instruction table):
+      efficacy_score = f1 if not NaN, else precision
+      Instructions not retrieved in this run keep their current score.
+
     Only persistent (semantic / contrastive) instructions are saved —
-    synthesised threshold warnings live in retriever._synthetic_cache and
-    are never written to parquet.
-
-    Also pushes the parquet to wandb as a new instructions_db version so
-    the artifact reflects the updated efficacy even when Loop B is
-    disabled or produces zero new instructions. If Loop B does run and
-    appends instructions, it will log a subsequent version on top —
-    the `latest` tag follows the most recent upload.
+    synthesised threshold warnings are never written to parquet.
     """
     m2_cfg = config.get("merlin2", {})
     instructions_path = m2_cfg.get("instructions_path", "data/instructions.parquet")
     persistent = pipeline.retriever._instructions
     if not persistent:
         return
+
+    # Apply post-hoc efficacy scores from instruction_eval.
+    if eval_tables:
+        per_instr = eval_tables.get("per_instruction")
+        if per_instr is not None and not per_instr.empty:
+            _apply_eval_scores(persistent, per_instr)
+
     save_instructions(persistent, instructions_path)
     logger.info(
-        "Saved efficacy score updates for %d instructions to %s",
+        "Saved efficacy scores for %d instructions to %s",
         len(persistent), instructions_path,
     )
     wandb_logger.log_instructions_artifact(
@@ -126,6 +133,28 @@ def save_efficacy_scores(pipeline: MERLINPipeline, config: dict) -> None:
         local_path=instructions_path,
     )
     wandb_logger.log_instruction_efficiency_tables(persistent)
+
+
+def _apply_eval_scores(
+    instructions: List[Instruction],
+    per_instr_df: "pd.DataFrame",
+) -> None:
+    """Write F1 (or precision) from per_instr_df back into each instruction object."""
+    import math
+    score_map: dict = {}
+    for row in per_instr_df.itertuples(index=False):
+        f1 = getattr(row, "f1", float("nan"))
+        prec = getattr(row, "precision", float("nan"))
+        score = f1 if (not math.isnan(f1)) else prec
+        if not math.isnan(score):
+            score_map[row.instruction_id] = float(score)
+
+    for instr in instructions:
+        if instr.instruction_id in score_map:
+            instr.efficacy_score = score_map[instr.instruction_id]
+            logger.debug(
+                "efficacy_score updated: id=%d → %.4f", instr.instruction_id, instr.efficacy_score
+            )
 
 
 # ---------------------------------------------------------------- predictions df + evaluation
@@ -147,8 +176,14 @@ def build_prediction_df(
         df["thinking"] = [r.final_thinking for r in results]
     df["iterations"] = [r.iterations for r in results]
     df["halt_reason"] = [r.halt_reason for r in results]
+    def _extract_coding_review(raw: str) -> str:
+        import re
+        m = re.search(r"<coding_review>(.*?)</coding_review>", raw, re.DOTALL)
+        return m.group(1).strip() if m else raw
+
     df["coding_review"] = [
-        r.history.coding_reviews[-1] if r.history.coding_reviews else "" for r in results
+        _extract_coding_review(r.history.coding_reviews[-1]) if r.history.coding_reviews else ""
+        for r in results
     ]
     df["retrieval_log"] = [format_retrieval_log(r) for r in results]
     return df
@@ -158,8 +193,14 @@ def evaluate_and_log(
     df: pd.DataFrame,
     results: List[PipelineCaseResult],
     config: dict,
-) -> Optional[pd.DataFrame]:
-    """Run evaluation and log all metrics to wandb. Returns None when ground truth is absent."""
+    instructions: Optional[List[Instruction]] = None,
+) -> Optional[tuple]:
+    """Run evaluation and log all metrics to wandb.
+
+    Returns (df_results, eval_tables) when ground truth is present,
+    None otherwise. eval_tables is the dict from instruction_eval.compute_all()
+    and is also passed to save_efficacy_scores() for the post-hoc score update.
+    """
     target_col = config["data"].get("target_col", "ICD_CODES")
     if target_col not in df.columns:
         logger.warning(f"Target column '{target_col}' not in data; skipping evaluation.")
@@ -178,9 +219,9 @@ def evaluate_and_log(
         y_true=ground_truth,
         y_pred=df_results["parsed_predictions"].tolist(),
     )
-    _log_retrieval_breakdown(results)
+    eval_tables = _log_retrieval_breakdown(results, ground_truth, instructions)
     _save_predictions_csv(df_results, config)
-    return df_results
+    return df_results, eval_tables
 
 
 def _log_per_iteration(results: List[PipelineCaseResult], ground_truth: List[List[str]]) -> None:
@@ -189,10 +230,26 @@ def _log_per_iteration(results: List[PipelineCaseResult], ground_truth: List[Lis
         wandb_logger.log_per_iteration_metrics(per_iter)
 
 
-def _log_retrieval_breakdown(results: List[PipelineCaseResult]) -> None:
+def _log_retrieval_breakdown(
+    results: List[PipelineCaseResult],
+    ground_truth: Optional[List[List[str]]] = None,
+    instructions: Optional[List[Instruction]] = None,
+) -> dict:
+    """Log retrieval path breakdown and instruction confusion matrix to wandb.
+
+    Returns the eval_tables dict (from compute_instruction_eval) so callers
+    can pass it to save_efficacy_scores for the post-hoc score update.
+    Returns an empty dict when ground truth or instructions are absent.
+    """
     events_df = flatten_retrieval_events(results)
     if not events_df.empty:
         wandb_logger.log_retrieval_type_pcts(events_df)
+
+    if ground_truth and instructions:
+        tables = compute_instruction_eval(results, ground_truth, instructions)
+        wandb_logger.log_instruction_confusion_matrix(tables)
+        return tables
+    return {}
 
 
 def _save_predictions_csv(df_results: pd.DataFrame, config: dict) -> None:
