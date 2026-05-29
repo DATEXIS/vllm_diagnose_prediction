@@ -111,7 +111,7 @@ def log_metrics(metrics: Dict[str, Any]) -> None:
 
     Uses wandb.summary so these values always reflect the final state of the
     run (all samples' final predictions) and are not a time-series step that
-    could be confused with per-iteration iter/all/* metrics.
+    could be confused with per-iteration iter/* metrics.
     """
     wandb.summary.update(
         {
@@ -127,17 +127,14 @@ def log_metrics(metrics: Dict[str, Any]) -> None:
 
 
 def log_per_iteration_metrics(per_iter: List[Dict[str, Any]]) -> None:
-    """`per_iter` is a list of dicts with 'all' and 'last_iter' sub-dicts, one per t.
+    """`per_iter` is a list of flat metric dicts, one per iteration t.
 
-    Keys logged:
-        iter/all/f1_micro, iter/all/f1_macro, iter/all/precision_micro, ...
-        iter/last_iter/f1_micro, ...
+    Keys logged: iter/f1_micro, iter/f1_macro, iter/precision_micro, ...
     """
     for t, entry in enumerate(per_iter):
         log_dict: Dict[str, Any] = {"iteration": t}
-        for setting, m in entry.items():
-            for k, v in m.items():
-                log_dict[f"iter/{setting}/{k}"] = v
+        for k, v in entry.items():
+            log_dict[f"iter/{k}"] = v
         wandb.log(log_dict)
 
 

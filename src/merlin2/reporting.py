@@ -22,40 +22,19 @@ def compute_per_iteration_metrics(
     results: List[PipelineCaseResult],
     ground_truth: List[List[str]],
 ) -> List[dict]:
-    """Compute eval metrics per iteration t under two groupings.
+    """Compute eval metrics per iteration t over all samples that have a prediction at t.
 
-    Returns one dict per iteration t, each with:
-      - 'all':       metrics over every sample that has a prediction at t.
-      - 'last_iter': metrics over only the samples whose final iteration is t.
-
-    At t=0 both groupings are identical. Metric keys: f1_micro, f1_macro,
-    precision_micro, recall_micro, precision_macro, recall_macro.
+    Returns one flat metrics dict per iteration t.
+    Metric keys: f1_micro, f1_macro, precision_micro, recall_micro,
+    precision_macro, recall_macro, parse_failures, n_samples.
     """
     max_iters = max(r.iterations for r in results) if results else 0
     out = []
     for t in range(max_iters):
-        entry = _iteration_entry(t, results, ground_truth)
+        entry = _metrics_at_t_all(t, results, ground_truth)
         if entry:
             out.append(entry)
     return out
-
-
-def _iteration_entry(
-    t: int,
-    results: List[PipelineCaseResult],
-    ground_truth: List[List[str]],
-) -> dict:
-    entry: dict = {}
-
-    all_metrics = _metrics_at_t_all(t, results, ground_truth)
-    if all_metrics:
-        entry["all"] = all_metrics
-
-    last_metrics = _metrics_at_t_last(t, results, ground_truth)
-    if last_metrics:
-        entry["last_iter"] = last_metrics
-
-    return entry
 
 
 def _metrics_at_t_all(
@@ -63,15 +42,18 @@ def _metrics_at_t_all(
     results: List[PipelineCaseResult],
     ground_truth: List[List[str]],
 ) -> dict:
-    """Metrics over all samples that have a prediction at iteration t."""
+    """Metrics over all samples at iteration t.
+
+    Samples that halted before t carry forward their last prediction, so
+    every iteration covers the full population and t=max equals summary charts.
+    """
     y_pred, y_true = [], []
     parse_failures = 0
     for r, truth in zip(results, ground_truth):
-        if t >= len(r.history.predictions):
-            continue
-        y_pred.append(_norm_codes_from_pred(r.history.predictions[t]))
+        effective_t = min(t, len(r.history.predictions) - 1)
+        y_pred.append(_norm_codes_from_pred(r.history.predictions[effective_t]))
         y_true.append([normalize_icd(c) for c in truth if normalize_icd(c)])
-        if r.halt_reason == "parse_failure" and len(r.history.predictions) - 1 == t:
+        if r.halt_reason == "parse_failure" and len(r.history.predictions) - 1 == effective_t:
             parse_failures += 1
 
     if not y_pred:
@@ -80,23 +62,6 @@ def _metrics_at_t_all(
     m["parse_failures"] = parse_failures
     m["n_samples"] = len(y_pred)
     return m
-
-
-def _metrics_at_t_last(
-    t: int,
-    results: List[PipelineCaseResult],
-    ground_truth: List[List[str]],
-) -> dict:
-    """Metrics over samples whose final iteration is t (i.e. they halted after this wave)."""
-    y_pred, y_true = [], []
-    for r, truth in zip(results, ground_truth):
-        if len(r.history.predictions) - 1 == t:
-            y_pred.append(_norm_codes_from_pred(r.history.predictions[t]))
-            y_true.append([normalize_icd(c) for c in truth if normalize_icd(c)])
-
-    if not y_pred:
-        return {}
-    return _metrics_dict(calculate_metrics(y_true, y_pred))
 
 
 def _norm_codes_from_pred(pred_model) -> List[str]:

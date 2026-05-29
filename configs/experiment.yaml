@@ -6,7 +6,7 @@
 
 # Run identification
 job_name: "merlin2"
-run_name: "merlin2-thinking"
+run_name: "merlin2-json-thinking"
 
 log_level: "INFO"
 
@@ -14,12 +14,12 @@ log_level: "INFO"
 inference:
   temperature: 0.4             # 0.6 + top_p 0.95 recommended for thinking mode; 0.2 for non-thinking
   top_p: 0.95
-  max_tokens: 8192
+  max_tokens: 3000
   concurrency: 64
   guided_decoding: true
 
-  instruction_reasoning: false  # include instruction_reasoning field in JSON schema + prompt example
-  thinking: False                # adds --enable-reasoning --reasoning-parser=qwen3 to vLLM server args
+  instruction_reasoning: true  # include instruction_reasoning field in JSON schema + prompt example
+  thinking: false                # adds --enable-reasoning --reasoning-parser=qwen3 to vLLM server args
   reasoning_budget: 2000
 
 # Dataset configuration
@@ -28,7 +28,7 @@ data:
   target_col: "ICD_CODES"
   admission_col: "admission_note"
   discharge_col: "discharge_note"     # used by Meta-Verifier only
-  sample_size: 5000
+  sample_size: 1000
 
 # Model configuration
 model:
