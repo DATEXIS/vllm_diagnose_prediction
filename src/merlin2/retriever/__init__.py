@@ -46,6 +46,7 @@ from .synthetic import (  # noqa: F401
 from .dedup import (
     cluster_deduplicate_semantic_events, per_code_cap_semantic_events,
 )
+from src.data.evaluate import normalize_icd
 from src.meta_verifier.code_stats import CodeStat, CodeStatsIndex
 from src.meta_verifier.schemas import Instruction, InstructionType
 from src.utils.embeddings import encode_single_text
@@ -69,6 +70,7 @@ class Retriever:
         code_stats: Optional[CodeStatsIndex] = None,
         section_names: Optional[List[str]] = None,
         ignore_phrases: Optional[List[str]] = None,
+        filter_saturated: bool = True,
     ):
         self.sim_note_threshold = sim_note_threshold
         self.sim_icd_threshold = sim_icd_threshold
@@ -81,6 +83,7 @@ class Retriever:
         self._code_stats: CodeStatsIndex = code_stats or {}
         self.section_names: List[str] = list(section_names or [])
         self.ignore_phrases: List[str] = list(ignore_phrases or [])
+        self.filter_saturated: bool = filter_saturated
 
         self._instructions: List[Instruction] = []
         self._synthetic_factory = SyntheticInstructionFactory()
@@ -301,7 +304,7 @@ class Retriever:
         if instr.instruction_id in triggered:
             # First path to claim this instruction wins.
             return
-        if _is_saturated(instr, predicted_set_3digit):
+        if self.filter_saturated and _is_saturated(instr, predicted_set_3digit):
             return
         triggered[instr.instruction_id] = RetrievalEvent(
             instruction_id=instr.instruction_id,
@@ -453,7 +456,9 @@ def _is_saturated(instr: Instruction, predicted_set_3digit: frozenset) -> bool:
         return False
     if not instr.target_codes or not predicted_set_3digit:
         return False
-    targets = set(instr.target_codes)
+    targets = {normalize_icd(c) for c in instr.target_codes if normalize_icd(c)}
+    if not targets:
+        return False
     if instr.action == "add" and targets.issubset(predicted_set_3digit):
         return True
     if instr.action == "remove" and targets.isdisjoint(predicted_set_3digit):

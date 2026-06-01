@@ -79,7 +79,7 @@ merlin2:
   # --- Instruction store ---
   instructions_path: "data/instructions.parquet"
   instructions_artifact_name: "instructions_db"
-  instructions_artifact_version: "v60"
+  instructions_artifact_version: "v62"
 
   # --- Per-code threshold-warning stats ---
   # Loop B writes new entries; Retriever synthesises FP/FN warning text at runtime.
@@ -90,7 +90,7 @@ merlin2:
 
 # Meta-Verifier (Loop B) -- toggle to mint instructions after a Loop-A pass.
 meta_verifier:
-  enabled: false
+  enabled: true
   embedding_model: "NeuML/pubmedbert-base-embeddings"
   temperature: 0.4
   max_tokens: 4096

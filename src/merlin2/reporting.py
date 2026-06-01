@@ -48,19 +48,22 @@ def _metrics_at_t_all(
     every iteration covers the full population and t=max equals summary charts.
     """
     y_pred, y_true = [], []
-    parse_failures = 0
+    n_samples_at_t = 0
+    parse_failures_at_t = 0
     for r, truth in zip(results, ground_truth):
         effective_t = min(t, len(r.history.predictions) - 1)
         y_pred.append(_norm_codes_from_pred(r.history.predictions[effective_t]))
         y_true.append([normalize_icd(c) for c in truth if normalize_icd(c)])
-        if r.halt_reason == "parse_failure" and len(r.history.predictions) - 1 == effective_t:
-            parse_failures += 1
+        if t < len(r.history.predictions):
+            n_samples_at_t += 1
+            if r.halt_reason == "parse_failure" and len(r.history.predictions) - 1 == t:
+                parse_failures_at_t += 1
 
     if not y_pred:
         return {}
     m = _metrics_dict(calculate_metrics(y_true, y_pred))
-    m["parse_failures"] = parse_failures
-    m["n_samples"] = len(y_pred)
+    m["n_samples"] = n_samples_at_t
+    m["parse_failure_pct"] = parse_failures_at_t / n_samples_at_t * 100 if n_samples_at_t else 0.0
     return m
 
 

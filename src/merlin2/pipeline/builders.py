@@ -51,6 +51,7 @@ def build_retriever(config: Dict[str, Any]) -> Retriever:
         code_stats=code_stats,
         section_names=section_cfg.get("sections", []),
         ignore_phrases=section_cfg.get("ignore_phrases", []),
+        filter_saturated=m2_cfg.get("filter_saturated", True),
     )
 
 
