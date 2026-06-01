@@ -17,7 +17,7 @@ metadata:
   labels:
     app: vllm-server-{{ cfg.job_name }}
 spec:
-  replicas: 1
+  replicas: {{ cfg.k8s.server.get('replicas', 1) }}
   selector:
     matchLabels:
       app: vllm-server-{{ cfg.job_name }}

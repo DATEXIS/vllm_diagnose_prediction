@@ -183,6 +183,17 @@ class MERLINPipeline:
         for s, retrieval, gen_res in zip(states, retrievals, gen_results):
             self._record_wave_result(s, retrieval, gen_res, iteration)
 
+        n_parse_failed = sum(r.parse_failed for r in gen_results)
+        n_empty = sum(
+            not r.parse_failed and not r.prediction.diagnoses for r in gen_results
+        )
+        if n_parse_failed or n_empty:
+            logger.warning(
+                "[PIPELINE] Wave %d summary: %d/%d parse failures, %d/%d empty diagnoses "
+                "— affected cases will retry next wave.",
+                iteration, n_parse_failed, len(gen_results), n_empty, len(gen_results),
+            )
+
     def _retrievals_for_wave(
         self,
         states: List[CaseState],
@@ -237,7 +248,7 @@ class MERLINPipeline:
             # halting immediately. The empty output (0 codes) triggers the
             # min_prediction_size guard in the Verifier so the case keeps
             # iterating. max_iterations remains the hard ceiling.
-            logger.warning(
+            logger.debug(
                 "[PIPELINE] Parse failure for %s at iteration %d — "
                 "treating as empty prediction, will retry next wave.",
                 s.hadm_id, iteration,
@@ -248,7 +259,7 @@ class MERLINPipeline:
             # Valid JSON but empty diagnoses list — same soft-land as parse failure.
             # The zero-prediction escalation message in instruction_feedback will
             # fire next wave because last_codes will be [].
-            logger.warning(
+            logger.debug(
                 "[PIPELINE] Empty diagnoses list for %s at iteration %d — "
                 "will retry next wave with zero-prediction escalation.",
                 s.hadm_id, iteration,

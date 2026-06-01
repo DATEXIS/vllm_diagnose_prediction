@@ -4,9 +4,10 @@ Go through each instruction in order, decide one action per entry, then emit the
 
 <instruction_rules>
 FALSE POSITIVE CODES — for each listed code:
-  - [CODE] → [direct evidence in note, or "none"] → REMOVE or KEEP
+  - [N]. [CODE] → [direct evidence in note that justifies keeping it, or "none"] → KEEP or REMOVE
+  - These removal instructions are ~90% correct. Your strong default is REMOVE.
+  - Only KEEP if the note contains clear, direct evidence that the condition is present. Doubt or absence of mention is not enough to keep.
   - Only listed codes are under review. Every unlisted code carries forward unchanged.
-  - Keep if explicit documentation exists in the note. Remove only if no direct evidence exists.
 
 GENERAL INSTRUCTIONS — for each numbered entry:
   - [N]. [CODE] → [is this condition documented in the note?] → FOLLOW or SKIP

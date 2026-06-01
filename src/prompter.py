@@ -44,7 +44,14 @@ def get_schema(instruction_reasoning: bool = True) -> Dict[str, Any]:
     """
     schema = ICDsModel.model_json_schema()
     schema.get("properties", {}).get("diagnoses", {})["minItems"] = 3
-    if not instruction_reasoning:
+    if instruction_reasoning:
+        # instruction_reasoning has a default so Pydantic omits it from required.
+        # Add it first so guided decoding generates it before diagnoses —
+        # the model can then use it as a scratchpad before committing to codes.
+        required = schema.setdefault("required", [])
+        if "instruction_reasoning" not in required:
+            required.insert(0, "instruction_reasoning")
+    else:
         schema.get("properties", {}).pop("instruction_reasoning", None)
         required = schema.get("required", [])
         if "instruction_reasoning" in required:
@@ -54,3 +61,5 @@ def get_schema(instruction_reasoning: bool = True) -> Dict[str, Any]:
         "schema": schema,
         "strict": True,
     }
+
+

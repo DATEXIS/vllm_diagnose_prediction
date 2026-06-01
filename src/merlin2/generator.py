@@ -111,7 +111,7 @@ class Generator:
             prediction = parse_prediction(raw)
             parse_failed = False
         except JSONExtractionError as e:
-            logger.warning(f"Parse failure: {e}. Returning empty prediction for this case.")
+            logger.debug(f"Parse failure: {e}. Returning empty prediction for this case.")
             prediction = ICDsModel(diagnoses=[])
             parse_failed = True
         return GenerateResult(

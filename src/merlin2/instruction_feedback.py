@@ -96,9 +96,7 @@ def _render_instruction_lines(
     parts: List[str] = []
     if fp:
         parts.append(_render_fp_line(fp))
-    parts.append(
-        "CANDIDATE CODES (additive only — do NOT remove any existing code based on these):"
-    )
+    parts.append("GENERAL INSTRUCTIONS")
     parts.extend(_render_semantic_line(i, n) for n, i in enumerate(semantic, 1))
     return "\n".join(parts).rstrip()
 
@@ -125,13 +123,11 @@ def _render_low_count_warning(n_codes: int) -> str:
 
 
 def _render_fp_line(fp_warnings: List[Instruction]) -> str:
-    code_stmts = "\n  ".join(f"* {i.instruction_text}" for i in fp_warnings)
-    return (
-        f"FALSE POSITIVE CODES:\nOnly the codes listed below are under question — "
-        f"all other codes in my prediction carry forward unchanged. "
-        f"For each code listed, I must find explicit documentation in the note to keep it; "
-        f"a plausible inference is not enough. Remove it only if no direct evidence exists.\n{code_stmts}"
+    code_stmts = "\n".join(
+        f"{n}. [{i.target_codes[0]}] {i.instruction_text}"
+        for n, i in enumerate(fp_warnings, 1)
     )
+    return f"FALSE POSITIVE CODES:\n{code_stmts}"
 
 
 def _render_semantic_line(instr: Instruction, n: int = 0) -> str:

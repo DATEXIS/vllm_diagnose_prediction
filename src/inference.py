@@ -254,14 +254,14 @@ async def run_inference_with_system(
     """Runs concurrent inference with a system prompt, returns raw text responses."""
     job_name = config.get('job_name', 'default')
     namespace = config.get('k8s', {}).get('namespace', "default")
-    
+
     api_base = config['model'].get('api_base')
     if not api_base:
         api_base = f"http://vllm-server-{job_name}.{namespace}.svc.cluster.local/v1"
-        
+
     url = f"{api_base}/chat/completions"
     concurrency = config.get('inference', {}).get('concurrency', 10)
-    
+
     async with ClientSession(timeout=ClientTimeout(total=3600)) as session:
         semaphore = asyncio.Semaphore(concurrency)
 

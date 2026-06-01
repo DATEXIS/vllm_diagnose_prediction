@@ -59,8 +59,9 @@ def build_json_example(instruction_reasoning: bool = True) -> str:
     obj: dict = {}
     if instruction_reasoning:
         obj["instruction_reasoning"] = (
-            "[FP] E11 91% FP — 'type 2 diabetes, on metformin' in PMH → keeping. "
-            "[Semantic] G47.33 if CPAP documented — 'uses CPAP nightly for OSA' → adding."
+            "E11.9 → 'type 2 diabetes documented in PMH, on metformin' → KEEP. "
+            "G47.33 → 'uses CPAP nightly for OSA' → KEEP. "
+            "I10 → 'persistent hypertension noted on admission' → KEEP."
         )
     obj["diagnoses"] = _EXAMPLE_DIAGNOSES
     return json.dumps(obj, indent=2)
@@ -71,11 +72,11 @@ GENERATOR_JSON_EXAMPLE = build_json_example(instruction_reasoning=True)
 
 # Field-description bullet injected into the system prompt when instruction_reasoning is on.
 INSTRUCTION_REASONING_FIELD_DOC = (
-    "\n  - instruction_reasoning: reason through every item in the LAST\n"
-    "    <coding_review> block (earlier blocks are context only). FP warning →\n"
-    "    state evidence found and keep/drop decision. FN warning or semantic\n"
-    "    instruction → state whether a supporting cue exists; dismiss and note\n"
-    "    if not. One phrase per item, ≤15 words. Leave \"\" if no block.\n"
+    "\n  - instruction_reasoning: work through every item in the LAST\n"
+    "    <coding_review> block before finalizing diagnoses. One phrase per item:\n"
+    "      [CODE] → [direct evidence in note, or \"none\"] → REMOVE or KEEP\n"
+    "    For semantic/FN instructions use ADD or SKIP instead of REMOVE/KEEP.\n"
+    "    Earlier blocks are context only. Leave \"\" if no block is present.\n"
 )
 
 
