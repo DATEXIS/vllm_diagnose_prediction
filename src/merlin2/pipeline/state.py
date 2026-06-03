@@ -34,6 +34,7 @@ class CaseState:
 
     # Per-iteration history (grows by one each wave the case participates in)
     predictions: List[ICDsModel] = field(default_factory=list)
+    parse_failed_at: List[bool] = field(default_factory=list)  # parallel to predictions
     raw_responses: List[str] = field(default_factory=list)
     thinking_responses: List[str] = field(default_factory=list)  # reasoning_content per iteration
     prompts: List[str] = field(default_factory=list)

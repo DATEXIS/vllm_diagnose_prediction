@@ -126,12 +126,14 @@ def log_metrics(metrics: Dict[str, Any]) -> None:
     )
 
 
-def log_per_iteration_metrics(per_iter: List[Dict[str, Any]]) -> None:
+def log_per_iteration_metrics(per_iter: List[Dict[str, Any]], offset: int = 0) -> None:
     """`per_iter` is a list of flat metric dicts, one per iteration t.
 
     Keys logged: iter/f1_micro, iter/f1_macro, iter/precision_micro, ...
+    `offset` shifts the iteration index, allowing single-entry calls mid-run.
     """
-    for t, entry in enumerate(per_iter):
+    for i, entry in enumerate(per_iter):
+        t = offset + i
         log_dict: Dict[str, Any] = {"iteration": t}
         for k, v in entry.items():
             log_dict[f"iter/{k}"] = v
@@ -148,21 +150,13 @@ def log_sample_table(df: pd.DataFrame, config: dict, n_samples: int = 30) -> Non
     """Log a small sample table for debugging. Strings only; no nested objects.
 
     Drops verbose / redundant columns:
-      - hadm_id / subject_id / discharge_note: identifiers or long text
-      - predictions: raw ICDsModel JSON — full_diagnoses and parsed_predictions
-        carry the same data in a more readable form and are always derived from
-        r.final_prediction, so logging the raw JSON would be redundant.
-      - admission_note: too long for a table cell; available in the data file.
-      - ICD_CODES / true_labels (original target column): already normalised
-        into true_codes by the pipeline.
+      - subject_id / discharge_note: identifiers or long text
+      - true_codes: normalised into parsed ground truth elsewhere
     """
     log_df = df.drop(
         columns=['subject_id', 'discharge_note', 'true_codes'],
         errors="ignore",
     )
-
-    if config['inference'].get('guided_decoding'):
-        log_df = log_df.drop(columns=['predictions'], errors="ignore")
 
     log_df = log_df.copy()
 
@@ -173,6 +167,27 @@ def log_sample_table(df: pd.DataFrame, config: dict, n_samples: int = 30) -> Non
 
     sample = log_df.head(n_samples).map(str)
     wandb.log({"sample_predictions": wandb.Table(dataframe=sample)})
+
+
+def log_no_valid_json_examples(df: pd.DataFrame, n_samples: int = 30) -> None:
+    """Log raw responses where JSON parsing yielded no diagnoses.
+
+    Filters to rows where parsed_predictions is empty, logs up to n_samples
+    as a wandb Table with hadm_id and the truncated raw_response.
+    """
+    if "parsed_predictions" not in df.columns or "raw_response" not in df.columns:
+        return
+    mask = df["parsed_predictions"].apply(lambda x: isinstance(x, list) and len(x) == 0)
+    failed = df[mask]
+    if failed.empty:
+        logger.info("No no-valid-JSON examples to log.")
+        return
+    rows = failed[["raw_response"]].copy()
+    if "hadm_id" in failed.columns:
+        rows.insert(0, "hadm_id", failed["hadm_id"])
+    rows = rows.head(n_samples).map(str)
+    wandb.log({"no_valid_json_examples": wandb.Table(dataframe=rows)})
+    logger.info("Logged %d no-valid-JSON examples.", len(rows))
 
 
 def log_retrieval_type_pcts(events_df: pd.DataFrame) -> None:

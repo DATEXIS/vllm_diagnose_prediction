@@ -449,11 +449,13 @@ def _is_saturated(instr: Instruction, predicted_set_3digit: frozenset) -> bool:
 
     action="add":    skip if ALL target codes are already predicted.
     action="remove": skip if NONE of the target codes are predicted.
-    contrastive_swap is never suppressed (suppression would require knowing
-    which direction the swap runs).
+
+    CONTRASTIVE_SWAP instructions are treated identically to SEMANTIC ones.
+    Each swap row has a single action direction ("add" or "remove") so the
+    same issubset/isdisjoint logic applies. The old exemption predated the
+    action field and caused swap instructions to flood the token budget even
+    when their target was already handled.
     """
-    if instr.type == InstructionType.CONTRASTIVE_SWAP:
-        return False
     if not instr.target_codes or not predicted_set_3digit:
         return False
     targets = {normalize_icd(c) for c in instr.target_codes if normalize_icd(c)}

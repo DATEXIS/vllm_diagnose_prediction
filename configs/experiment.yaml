@@ -6,7 +6,7 @@
 
 # Run identification
 job_name: "merlin2"
-run_name: "merlin2-think"
+run_name: "merlin2-think-no-guid-v61"
 
 log_level: "INFO"
 
@@ -16,7 +16,7 @@ inference:
   top_p: 0.95
   max_tokens: 4000
   concurrency: 256
-  guided_decoding: True
+  guided_decoding: false
 
   instruction_reasoning: false  # include instruction_reasoning field in JSON schema + prompt example
   thinking: true                # adds --enable-reasoning --reasoning-parser=qwen3 to vLLM server args
@@ -59,7 +59,7 @@ merlin2:
   fpr_threshold: 0.85               # reduced false prunes; codes 0.75-0.84 were often true positives
   min_support: 2                    # minimum case count before a code is eligible for code_stats
   convergence_threshold: 0.95
-  max_iterations: 5                 # increased; budget_exhausted was cutting off improving cases early
+  max_iterations: 6                 # increased; budget_exhausted was cutting off improving cases early
   dedup_cluster_threshold: 0.90     # collapse semantic instructions with embedding cosine sim >= this;
                                     # 1.0 disables. Tune via retrieval log output.
   max_instructions_per_code: 1      # keep at most this many semantic instructions per target ICD code
@@ -79,7 +79,7 @@ merlin2:
   # --- Instruction store ---
   instructions_path: "data/instructions.parquet"
   instructions_artifact_name: "instructions_db"
-  instructions_artifact_version: "v62"
+  instructions_artifact_version: "v61"
 
   # --- Per-code threshold-warning stats ---
   # Loop B writes new entries; Retriever synthesises FP/FN warning text at runtime.
@@ -90,7 +90,7 @@ merlin2:
 
 # Meta-Verifier (Loop B) -- toggle to mint instructions after a Loop-A pass.
 meta_verifier:
-  enabled: true
+  enabled: false
   embedding_model: "NeuML/pubmedbert-base-embeddings"
   temperature: 0.4
   max_tokens: 4096

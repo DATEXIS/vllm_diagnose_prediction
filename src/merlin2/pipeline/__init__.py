@@ -21,7 +21,7 @@ This file is intentionally thin. Heavy lifting lives in sibling modules:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from src.merlin2.generator import Generator, GenerateRequest, GenerateResult
 from .builders import build_generator, build_retriever, build_verifier
@@ -63,12 +63,15 @@ class MERLINPipeline:
         admission_notes: List[str],
         hadm_ids: Optional[List[str]] = None,
         ground_truth_codes: Optional[List[List[str]]] = None,
+        on_wave_end: Optional[Callable[[List[CaseState], int], None]] = None,
     ) -> List[PipelineCaseResult]:
         states = self._init_states(admission_notes, hadm_ids, ground_truth_codes)
         self._parse_note_sections(states)
 
         logger.info(f"[PIPELINE] Wave 0 (zero-shot): {len(states)} cases")
         await self._run_wave(states, iteration=0)
+        if on_wave_end:
+            on_wave_end(states, 0)
 
         if not self.retriever.instructions:
             return self._halt_all_with_empty_db(states)
@@ -79,6 +82,8 @@ class MERLINPipeline:
                 break
             logger.info(f"[PIPELINE] Wave {t}: {len(live)} live cases")
             await self._refinement_wave(live, iteration=t)
+            if on_wave_end:
+                on_wave_end(states, t)
 
         self._halt_remaining(states, HaltReason.MAX_ITERATIONS_REACHED)
         return [finalize_case(s) for s in states]
@@ -233,6 +238,7 @@ class MERLINPipeline:
         iteration: int,
     ) -> None:
         s.predictions.append(gen_res.prediction)
+        s.parse_failed_at.append(gen_res.parse_failed)
         s.raw_responses.append(gen_res.raw_response)
         s.thinking_responses.append(gen_res.thinking_content)
         s.prompts.append(gen_res.prompt)
@@ -248,10 +254,10 @@ class MERLINPipeline:
             # halting immediately. The empty output (0 codes) triggers the
             # min_prediction_size guard in the Verifier so the case keeps
             # iterating. max_iterations remains the hard ceiling.
-            logger.debug(
-                "[PIPELINE] Parse failure for %s at iteration %d — "
-                "treating as empty prediction, will retry next wave.",
-                s.hadm_id, iteration,
+            snippet = (gen_res.raw_response or "")[:300].replace("\n", " ")
+            logger.warning(
+                "[PIPELINE] Parse failure for %s at iteration %d — raw[:300]: %s",
+                s.hadm_id, iteration, snippet,
             )
             return
 

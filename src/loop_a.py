@@ -23,7 +23,7 @@ from src.data.evaluate import evaluate_predictions, normalize_icd, safe_parse_tr
 from src.merlin2.instruction_eval import compute_all as compute_instruction_eval
 from src.merlin2.pipeline import MERLINPipeline, PipelineCaseResult
 from src.merlin2.reporting import (
-    compute_per_iteration_metrics,
+    compute_metrics_at_t,
     flatten_retrieval_events,
     format_retrieval_log,
 )
@@ -86,11 +86,19 @@ def build_pipeline(config: dict) -> Tuple[MERLINPipeline, list]:
 async def run_loop_a(
     pipeline: MERLINPipeline, df: pd.DataFrame
 ) -> List[PipelineCaseResult]:
-    ground_truth = df["true_codes"].tolist() if "true_codes" in df.columns else None
+    has_ground_truth = "true_codes" in df.columns
+    ground_truth = df["true_codes"].tolist() if has_ground_truth else None
+
+    def _on_wave_end(states, t):
+        metrics = compute_metrics_at_t(t, states)
+        if metrics:
+            wandb_logger.log_per_iteration_metrics([metrics], offset=t)
+
     return await pipeline.run(
         admission_notes=df["admission_note"].tolist(),
         hadm_ids=df["hadm_id"].astype(str).tolist(),
         ground_truth_codes=ground_truth,
+        on_wave_end=_on_wave_end if has_ground_truth else None,
     )
 
 
@@ -170,8 +178,7 @@ def build_prediction_df(
         else set()
     )
     df["predictions"] = [r.final_prediction.model_dump_json(exclude=_exclude) for r in results]
-    if not config["inference"].get("guided_decoding", "true"):
-        df["raw_response"] = [r.final_raw_response for r in results]
+    df["raw_response"] = [r.final_raw_response for r in results]
     if config["inference"].get("thinking", False):
         df["thinking"] = [r.final_thinking for r in results]
     df["iterations"] = [r.iterations for r in results]
@@ -210,10 +217,8 @@ def evaluate_and_log(
     ground_truth = df["true_codes"].tolist()
 
     wandb_logger.log_sample_table(df_results, config, n_samples=30)
+    wandb_logger.log_no_valid_json_examples(df_results)
     wandb_logger.log_predictions_artifact(df_results)
-    _log_per_iteration(results, ground_truth)
-    # Log final summary AFTER per-iteration so the wandb summary reflects the
-    # true final-prediction quality, not the last logged time-series step.
     wandb_logger.log_metrics(metrics)
     wandb_logger.log_icd_counts(
         y_true=ground_truth,
@@ -222,12 +227,6 @@ def evaluate_and_log(
     eval_tables = _log_retrieval_breakdown(results, ground_truth, instructions)
     _save_predictions_csv(df_results, config)
     return df_results, eval_tables
-
-
-def _log_per_iteration(results: List[PipelineCaseResult], ground_truth: List[List[str]]) -> None:
-    per_iter = compute_per_iteration_metrics(results, ground_truth)
-    if per_iter:
-        wandb_logger.log_per_iteration_metrics(per_iter)
 
 
 def _log_retrieval_breakdown(

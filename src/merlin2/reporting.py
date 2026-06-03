@@ -12,51 +12,32 @@ from typing import List
 import pandas as pd
 
 from src.data.evaluate import calculate_metrics, normalize_icd, sample_prf
-from src.merlin2.pipeline import CaseState, PipelineCaseResult
+from src.merlin2.pipeline.state import CaseState
 from src.merlin2.retriever import THRESHOLD_FPR, is_semantic_path
+from src.meta_verifier.schemas import InstructionType
 
 
 # --------------------------------------------------------- per-iteration metrics
 
-def compute_per_iteration_metrics(
-    results: List[PipelineCaseResult],
-    ground_truth: List[List[str]],
-) -> List[dict]:
-    """Compute eval metrics per iteration t over all samples that have a prediction at t.
-
-    Returns one flat metrics dict per iteration t.
-    Metric keys: f1_micro, f1_macro, precision_micro, recall_micro,
-    precision_macro, recall_macro, parse_failures, n_samples.
-    """
-    max_iters = max(r.iterations for r in results) if results else 0
-    out = []
-    for t in range(max_iters):
-        entry = _metrics_at_t_all(t, results, ground_truth)
-        if entry:
-            out.append(entry)
-    return out
-
-
-def _metrics_at_t_all(
-    t: int,
-    results: List[PipelineCaseResult],
-    ground_truth: List[List[str]],
-) -> dict:
+def compute_metrics_at_t(t: int, states: List[CaseState]) -> dict:
     """Metrics over all samples at iteration t.
 
-    Samples that halted before t carry forward their last prediction, so
+    Samples with ground_truth_codes=None are skipped (test/eval run).
+    Samples that halted before t carry forward their last prediction so
     every iteration covers the full population and t=max equals summary charts.
     """
     y_pred, y_true = [], []
     n_samples_at_t = 0
     parse_failures_at_t = 0
-    for r, truth in zip(results, ground_truth):
-        effective_t = min(t, len(r.history.predictions) - 1)
-        y_pred.append(_norm_codes_from_pred(r.history.predictions[effective_t]))
-        y_true.append([normalize_icd(c) for c in truth if normalize_icd(c)])
-        if t < len(r.history.predictions):
+    for s in states:
+        if s.ground_truth_codes is None or not s.predictions:
+            continue
+        effective_t = min(t, len(s.predictions) - 1)
+        y_pred.append(_norm_codes_from_pred(s.predictions[effective_t]))
+        y_true.append([normalize_icd(c) for c in s.ground_truth_codes if normalize_icd(c)])
+        if t < len(s.predictions):
             n_samples_at_t += 1
-            if r.halt_reason == "parse_failure" and len(r.history.predictions) - 1 == t:
+            if t < len(s.parse_failed_at) and s.parse_failed_at[t]:
                 parse_failures_at_t += 1
 
     if not y_pred:
@@ -232,12 +213,13 @@ def _eval_annotation(instr, gt_set: set, pred_t_codes: set, pred_prev_codes: set
                  right to be warned against adding it)
 
     Adoption status (what the model did at this wave):
-        +added      — add instruction, code was absent at t-1 and present at t
-        already-in  — add instruction, code already present at t-1 and still at t
-        ignored     — add instruction, code absent at t
+        +added      — add instruction, ≥1 target was absent at t-1 and present at t
+        already-in  — add instruction, all present targets were already in t-1 (nothing new added)
+        ignored     — add instruction, no target present at t
         -removed    — remove instruction, code present at t-1 and absent at t
         already-out — remove instruction, code absent at both t-1 and t
         ignored     — remove instruction, code still present at t
+        swap        — CONTRASTIVE_SWAP (saturation not applicable; adoption is directional)
     """
     if not gt_set:
         return ""
@@ -255,13 +237,20 @@ def _eval_annotation(instr, gt_set: set, pred_t_codes: set, pred_prev_codes: set
 
     tick = "✓" if correct else "✗"
 
-    # Adoption
+    # CONTRASTIVE_SWAP: label distinctly so the log doesn't mislead with
+    # already-in/already-out (which imply the instruction was a no-op, but swap
+    # instructions now go through the same saturation filter as SEMANTIC ones).
+    if instr.type == InstructionType.CONTRASTIVE_SWAP:
+        return f"  {tick}  swap"
+
+    # Adoption — semantics deliberately mirror _is_saturated so the label only
+    # fires when the instruction was genuinely a no-op at retrieval time.
     if action == "add":
-        in_t = norm_targets & pred_t_codes
-        in_prev = norm_targets & pred_prev_codes
-        if in_t and not (in_t & in_prev):
+        newly_added = (norm_targets - pred_prev_codes) & pred_t_codes
+        if newly_added:
             status = "+added"
-        elif in_t:
+        elif norm_targets & pred_t_codes:
+            # All present targets were already there before retrieval.
             status = "already-in"
         else:
             status = "ignored"

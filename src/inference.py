@@ -363,7 +363,7 @@ def extract_text_from_responses(responses: List[Any]) -> List[str]:
             finish_reason = choice.get("finish_reason", "unknown")
             if finish_reason == "length":
                 usage = resp.get("usage", {})
-                logger.warning(
+                logger.debug(
                     f"Response {i} hit max_tokens (finish_reason=length). "
                     f"completion_tokens={usage.get('completion_tokens', '?')}, "
                     f"prompt_tokens={usage.get('prompt_tokens', '?')}"
